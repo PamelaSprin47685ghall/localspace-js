@@ -1,27 +1,36 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { hostHeaderValidation, localhostHostValidation } from "@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js";
-import express, { type Express } from "express";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
+import {
+  McpServer,
+  WebStandardStreamableHTTPServerTransport,
+  checkResourceAllowed,
+  createMcpHandler,
+  isLegacyRequest,
+  resourceUrlFromServerUrl,
+  type McpHandlerRequestOptions,
+} from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import {
+  getOAuthProtectedResourceMetadataUrl,
+  hostHeaderValidation,
+  localhostHostValidation,
+  requireBearerAuth,
+} from "@modelcontextprotocol/express";
+import { mcpAuthRouter } from "@modelcontextprotocol/server-legacy/auth";
+import express, { type Express, type RequestHandler } from "express";
 import type { Request, Response } from "express";
 import { loadConfig, type ServerConfig } from "./config.js";
-import { logEvent, requestIp, requestPath, sessionIdPrefix } from "./logger.js";
+import { logEvent, requestIp, requestPath } from "./logger.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
-import { McpSessionRegistry, type McpSessionRegistryEvent } from "./mcp-session-registry.js";
 import { AuditLogManager } from "./audit-log.js";
 import { ToolActivityLogManager } from "./activity-log.js";
 import { trafficLog } from "./traffic-log.js";
-import { McpRequestMetricsManager, type RequestConnectionOutcome } from "./request-metrics.js";
 import { registerJsSurface } from "./program/tools.js";
 import { globalParkTable } from "./program/park.js";
 import { liveProgramCount, shutdownPrograms } from "./program/runner.js";
@@ -29,6 +38,7 @@ import { startEventLoopMonitor } from "./event-loop-monitor.js";
 
 /** JSON-RPC body limit. express.json()'s 100kb default rejected long js programs with 413. */
 const MCP_BODY_LIMIT = "8mb";
+const MCP_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
 
 /** Same host validation as the SDK's createMcpExpressApp, with our body limit. */
 function createMcpApp(host: string, allowedHosts?: string[]): Express {
@@ -45,8 +55,6 @@ const LOCALSPACE_VERSION =
   typeof packageJson.version === "string" && packageJson.version.trim()
     ? packageJson.version.trim()
     : "0.0.0";
-
-type Transport = StreamableHTTPServerTransport;
 
 export interface RunningServer {
   app: Express;
@@ -88,12 +96,6 @@ function mcpRpcRequestInfo(body: unknown): {
     : undefined;
   const workspaceId = typeof args?.workspaceId === "string" ? args.workspaceId : undefined;
   return { rpcMethod, tool, workspaceId };
-}
-
-function optionalByteLength(value: string | number | string[] | undefined): number | undefined {
-  if (typeof value === "number") return value;
-  if (typeof value === "string" && value.trim()) return Number(value);
-  return undefined;
 }
 
 function createMcpServer(
@@ -138,24 +140,24 @@ export function createServer(config = loadConfig()): RunningServer {
     onLag: (lag) =>
       logEvent(config.logging, "warn", "event_loop_lag", { ...lag, livePrograms: liveProgramCount() }),
   });
-  const transports = config.mcpTransportMode === "stateful"
-    ? new McpSessionRegistry<Transport>(config.mcpSessions, (event) => {
-        logMcpSessionEvent(config, event);
-      })
-    : undefined;
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
-  const bearerAuth = requireBearerAuth({
-    verifier: oauthProvider,
-    requiredScopes: [config.oauth.scopes[0] ?? "localspace"],
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
-  });
+  const authenticate: RequestHandler =
+    config.authMode === "none"
+      ? (req, _res, next) => {
+          req.auth = { token: "", clientId: "local", scopes: [], resource: resourceServerUrl };
+          next();
+        }
+      : requireBearerAuth({
+          verifier: oauthProvider,
+          requiredScopes: [config.oauth.scopes[0] ?? "localspace"],
+          resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+        });
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const auditLog = new AuditLogManager(config.audit);
   const activityLog = new ToolActivityLogManager(config.audit.maxMemoryEvents);
-  const requestMetrics = new McpRequestMetricsManager(config.audit.maxMemoryEvents);
   // Trust only the real proxy hop(s) so req.ip (and express-rate-limit keys) is the real client IP.
   if (config.logging.trustProxy !== false) {
     app.set("trust proxy", config.logging.trustProxy);
@@ -205,161 +207,55 @@ export function createServer(config = loadConfig()): RunningServer {
 
   app.use("/mcp", trafficLog(config.stateDir, !/^(0|false|off)$/i.test(process.env.LOCALSPACE_TRAFFIC_LOG ?? "")));
 
-  app.all("/mcp", async (req, res) => {
-    const requestId = res.locals.requestId as string | undefined;
-    const sessionId = req.header("mcp-session-id");
-    const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
-    const rpcInfo = mcpRpcRequestInfo(req.body);
-    const requestStartedAt = performance.now();
-    let authMs = 0;
-    let serverCreateMs = 0;
-    let transportConnectMs = 0;
-    let transportHandleMs = 0;
-    let cleanupMs = 0;
-    let handlerFailed = false;
-
+  // One factory serves both eras: 2026-07-28 (server/discover, per-request envelope) via createMcpHandler,
+  // 2025-era (initialize handshake) via a stateless JSON transport so legacy replies stay application/json.
+  const factory = () => createMcpServer(config, workspaces, auditLog, activityLog);
+  const current = new AsyncLocalStorage<Request>();
+  const onerror = (error: Error) => logTransportError(config, current.getStore(), error);
+  const modern = createMcpHandler(factory, { legacy: "reject", onerror, maxRequestBodySize: MCP_BODY_LIMIT_BYTES });
+  const legacy = async (request: globalThis.Request, options?: McpHandlerRequestOptions) => {
+    if (request.method !== "POST") {
+      return globalThis.Response.json(
+        { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed in stateless mode" }, id: null },
+        { status: 405, headers: { Allow: "POST" } },
+      );
+    }
+    const server = factory();
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    transport.onerror = onerror;
+    await server.connect(transport);
+    // Client gone before the reply: closing the server aborts in-flight handlers (ctx.mcpReq.signal),
+    // which kills the program's worker and process groups. The modern path does the same internally.
+    const close = () => void server.close().catch(() => undefined);
+    request.signal.addEventListener("abort", close, { once: true });
     try {
-      const authStartedAt = performance.now();
-      try {
-        if (config.authMode === "none") {
-          (req as { auth?: { resource?: URL } }).auth = { resource: resourceServerUrl };
-        } else {
-          await new Promise<void>((resolve, reject) => {
-            bearerAuth(req, res, (error?: unknown) => {
-              if (error) reject(error);
-              else resolve();
-            });
-          });
-        }
-      } finally {
-        authMs = Math.round((performance.now() - authStartedAt) * 100) / 100;
-      }
-      if (res.headersSent) return;
+      return await transport.handleRequest(request, options);
+    } finally {
+      request.signal.removeEventListener("abort", close);
+      close();
+    }
+  };
+  const mcp = toNodeHandler(
+    {
+      fetch: async (request, options) =>
+        (await isLegacyRequest(request, options?.parsedBody)) ? legacy(request, options) : modern.fetch(request, options),
+    },
+    { onerror, maxRequestBodySize: MCP_BODY_LIMIT_BYTES },
+  );
 
-      if (
-        !req.auth?.resource ||
-        !checkResourceAllowed({
-          requestedResource: req.auth.resource,
-          configuredResource: resourceServerUrl,
-        })
-      ) {
+  app.all("/mcp", authenticate, async (req, res) => {
+    try {
+      if (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl })) {
         sendJsonRpcError(res, 401, -32001, "Unauthorized");
         return;
       }
-
-      if (config.mcpTransportMode === "stateless") {
-        if (req.method !== "POST") {
-          res.setHeader("Allow", "POST");
-          sendJsonRpcError(res, 405, -32000, "Method not allowed in stateless mode");
-          return;
-        }
-        const serverCreateStartedAt = performance.now();
-        const statelessTransport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
-          enableJsonResponse: true,
-        });
-        statelessTransport.onerror = (error) => logTransportError(config, req, requestId, error);
-        const statelessServer = createMcpServer(config, workspaces, auditLog, activityLog);
-        // Client gone before the reply: closing the server aborts in-flight handlers (extra.signal),
-        // which kills the program's worker and process groups.
-        res.on("close", () => {
-          if (!res.writableFinished) void statelessServer.close().catch(() => undefined);
-        });
-        serverCreateMs = Math.round((performance.now() - serverCreateStartedAt) * 100) / 100;
-        const connectStartedAt = performance.now();
-        await statelessServer.connect(statelessTransport);
-        transportConnectMs = Math.round((performance.now() - connectStartedAt) * 100) / 100;
-        try {
-          const handleStartedAt = performance.now();
-          try {
-            await statelessTransport.handleRequest(req, res, req.body);
-          } finally {
-            transportHandleMs = Math.round((performance.now() - handleStartedAt) * 100) / 100;
-          }
-        } finally {
-          const cleanupStartedAt = performance.now();
-          try {
-            await statelessServer.close();
-          } catch (error) {
-            logEvent(config.logging, "warn", "mcp_stateless_cleanup_error", {
-              requestId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          } finally {
-            cleanupMs = Math.round((performance.now() - cleanupStartedAt) * 100) / 100;
-          }
-        }
-        return;
-      }
-
-      let transport: Transport | undefined;
-      if (!transports) throw new Error("Stateful MCP session registry is unavailable.");
-      if (sessionId) {
-        transport = transports.get(sessionId);
-        if (!transport) {
-          sendJsonRpcError(res, 404, -32001, "Session not found");
-          return;
-        }
-      } else if (initializeRequest) {
-        const serverCreateStartedAt = performance.now();
-        transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (newSessionId) => {
-            if (transport) transports.add(newSessionId, transport);
-          },
-        });
-        transport.onerror = (error) => logTransportError(config, req, requestId, error);
-        transport.onclose = () => {
-          const closedSessionId = transport?.sessionId;
-          if (closedSessionId) {
-            transports.delete(closedSessionId, "client_closed", { closeTransport: false });
-          }
-        };
-        const server = createMcpServer(config, workspaces, auditLog, activityLog);
-        serverCreateMs = Math.round((performance.now() - serverCreateStartedAt) * 100) / 100;
-        const connectStartedAt = performance.now();
-        await server.connect(transport);
-        transportConnectMs = Math.round((performance.now() - connectStartedAt) * 100) / 100;
-      } else {
-        sendJsonRpcError(res, 400, -32000, "No valid MCP session");
-        return;
-      }
-
-      const handleStartedAt = performance.now();
-      try {
-        await transport.handleRequest(req, res, req.body);
-      } finally {
-        transportHandleMs = Math.round((performance.now() - handleStartedAt) * 100) / 100;
-      }
+      await current.run(req, () => mcp(req, res, req.body));
     } catch (error) {
-      handlerFailed = true;
       logEvent(config.logging, "error", "mcp_request_error", {
-        requestId,
+        requestId: res.locals.requestId,
         error: error instanceof Error ? error.message : String(error),
       });
       if (!res.headersSent) sendJsonRpcError(res, 500, -32603, "Internal server error");
-    } finally {
-      const totalMs = Math.round((performance.now() - requestStartedAt) * 100) / 100;
-      const connectionOutcome: RequestConnectionOutcome = handlerFailed ? "response_error" : "completed";
-      requestMetrics.record({
-        requestId,
-        transportMode: config.mcpTransportMode,
-        httpMethod: req.method,
-        rpcMethod: rpcInfo.rpcMethod,
-        tool: rpcInfo.tool,
-        workspaceId: rpcInfo.workspaceId,
-        status: res.statusCode,
-        success: res.statusCode < 400 && !handlerFailed,
-        requestBytes: optionalByteLength(req.header("content-length")),
-        responseBytes: optionalByteLength(res.getHeader("content-length") as string | number | string[] | undefined),
-        authMs,
-        serverCreateMs,
-        transportConnectMs,
-        transportHandleMs,
-        cleanupMs,
-        totalMs,
-        connectionOutcome,
-      });
     }
   });
 
@@ -369,7 +265,7 @@ export function createServer(config = loadConfig()): RunningServer {
     config,
     close: () => {
       closePromise ??= (async () => {
-        await transports?.closeAll("server_shutdown");
+        await modern.close();
         globalParkTable.clear();
         shutdownPrograms();
         loopMonitor.stop();
@@ -381,27 +277,18 @@ export function createServer(config = loadConfig()): RunningServer {
   };
 }
 
-/** The SDK answers malformed/unsupported requests with 400 itself; record why. */
-function logTransportError(config: ServerConfig, req: Request, requestId: string | undefined, error: Error): void {
+/** The SDK answers malformed/unsupported requests with 4xx itself; record why. */
+function logTransportError(config: ServerConfig, req: Request | undefined, error: Error): void {
   logEvent(config.logging, "warn", "mcp_transport_error", {
-    requestId,
+    requestId: req?.res?.locals.requestId,
     error: error.message,
-    httpMethod: req.method,
-    rpcMethod: mcpRpcRequestInfo(req.body).rpcMethod,
-    protocolVersion: req.header("mcp-protocol-version"),
-    accept: req.header("accept"),
-    contentType: req.header("content-type"),
-    userAgent: req.header("user-agent"),
-  });
-}
-
-function logMcpSessionEvent(config: ServerConfig, event: McpSessionRegistryEvent): void {
-  logEvent(config.logging, "info", event.action === "created" ? "mcp_session_created" : "mcp_session_closed", {
-    sessionIdPrefix: sessionIdPrefix(event.sessionId),
-    reason: event.reason,
-    activeSessions: event.activeSessions,
-    ageMs: event.ageMs,
-    idleMs: event.idleMs,
+    httpMethod: req?.method,
+    rpcMethod: mcpRpcRequestInfo(req?.body).rpcMethod,
+    protocolVersion: req?.header("mcp-protocol-version"),
+    mcpMethod: req?.header("mcp-method"),
+    accept: req?.header("accept"),
+    contentType: req?.header("content-type"),
+    userAgent: req?.header("user-agent"),
   });
 }
 
@@ -418,7 +305,6 @@ if (await isMainModule()) {
     console.log(`localspace-js listening on http://${config.host}:${config.port}/mcp`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`auth: ${config.authMode}`);
-    console.log(`mcp transport: ${config.mcpTransportMode}`);
   });
   let shuttingDown = false;
   const shutdown = async () => {

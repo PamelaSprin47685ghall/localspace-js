@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
-import { InvalidRequestError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { InvalidRequestError, type OAuthRegisteredClientsStore } from "@modelcontextprotocol/server-legacy/auth";
+import type { OAuthClientInformationFull } from "@modelcontextprotocol/server";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 
 export interface PersistedAccessTokenRecord {

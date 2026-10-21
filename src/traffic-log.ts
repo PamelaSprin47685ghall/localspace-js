@@ -6,6 +6,10 @@ import type { RequestHandler } from "express";
 const HOUR = 3_600_000;
 const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13).replace(/[-T]/g, "");
 
+const SECRET_HEADERS = new Set(["authorization", "cookie"]);
+const redact = (headers: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), SECRET_HEADERS.has(k.toLowerCase()) ? "[redacted]" : v]));
+
 const parse = (text: string): unknown => {
   try { return JSON.parse(text); } catch { return text; }
 };
@@ -50,6 +54,7 @@ export function trafficLog(stateDir: string, enabled = true): RequestHandler {
         ip: req.ip,
         userAgent: req.header("user-agent"),
         protocolVersion: req.header("mcp-protocol-version"),
+        headers: redact(req.headers),
         request: req.body,
         response: parse(Buffer.concat(chunks).toString("utf8")),
       }).catch(() => undefined);

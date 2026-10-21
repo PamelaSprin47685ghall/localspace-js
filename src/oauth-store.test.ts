@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { OAuthError } from "@modelcontextprotocol/server";
+import { InvalidGrantError } from "@modelcontextprotocol/server-legacy/auth";
 import { databasePath, openDatabase } from "./db/client.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
@@ -231,7 +232,7 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
     );
 
     await secondProvider.revokeToken(client, { token: refreshed.access_token });
-    await assert.rejects(secondProvider.verifyAccessToken(refreshed.access_token), InvalidTokenError);
+    await assert.rejects(secondProvider.verifyAccessToken(refreshed.access_token), OAuthError);
 
     await secondProvider.revokeToken(client, { token: refreshed.refresh_token });
     await assert.rejects(

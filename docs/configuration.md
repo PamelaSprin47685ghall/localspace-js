@@ -39,66 +39,16 @@ localspace config set publicBaseUrl https://localspace.example.com
 | `LOCALSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.localspace/worktrees`. |
 | `LOCALSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/localspace`. |
 | `LOCALSPACE_SHELL` | Optional shell executable for `exec_command`, for example `cmd.exe`, `powershell.exe`, `pwsh`, Git Bash, or `wsl.exe`. |
-| `LOCALSPACE_MCP_TRANSPORT_MODE` | MCP transport mode. Defaults to `stateless`; set `stateful` only when session-scoped transport behavior is required. |
 | `LOCALSPACE_TOOL_PACKS` | Optional comma-separated tool packs. Currently accepts only `code-intelligence`; defaults to no packs. |
 
-## MCP Session Lifecycle
+## MCP 协议与传输
 
-LocalSpace keeps one in-memory MCP transport per active client session. To avoid
-stale browser or tunnel reconnections accumulating until Node.js runs out of
-heap, sessions are now bounded and cleaned up automatically.
+`/mcp` 只有无状态模式（旧的 stateful 模式与 `LOCALSPACE_MCP_TRANSPORT_MODE`、`LOCALSPACE_MCP_SESSION_*`、`LOCALSPACE_MCP_MAX_SESSIONS` 已删除）：
 
-`LOCALSPACE_MCP_TRANSPORT_MODE=stateless` is the default. It creates
-a fresh MCP server and transport for every POST request, returns direct JSON
-responses, and does not issue an `Mcp-Session-Id`. GET and DELETE requests to
-`/mcp` return HTTP 405 in this mode because there is no session-scoped SSE stream
-or session to delete.
-
-Workspace registrations, review checkpoints, process sessions, audit state, and
-command approval tokens remain shared at the LocalSpace process level, so
-multi-request workflows such as `exec_command` followed by `write_stdin` still
-work without a transport session. A LocalSpace process restart still clears
-non-persisted runtime state such as active child-process handles and outstanding
-approval tokens.
-
-Long-running process tools intentionally keep each individual MCP HTTP request
-short: `exec_command`, `run_checks`, and `write_stdin` wait at most 5 seconds
-per call and default to 3 seconds before returning a resumable session. This
-reduces silent request time across public tunnels and MCP connectors without
-changing the stateless transport model. Client aborts, early response closes,
-and response errors are classified in request metrics; abnormal MCP connection
-outcomes are also written to the durable audit log.
-
-Process and check-group sessions are retained for five minutes after completion
-so a lost ChatGPT/tool continuation can be recovered without re-running the
-command. `session_summary` lists recoverable sessions, including completed ones,
-and `write_stdin` can replay the retained result/output for a completed session.
-After a browser, client, or assistant reply interruption, query
-`session_summary` before launching replacement commands; resume the matching
-session ID instead when one exists. Child process sessions owned by a
-`run_checks` group are hidden from the recovery list so the group session remains
-the single recovery handle.
-
-This mode has been validated with a real ChatGPT conversation across repeated
-LocalSpace restarts without refreshing the page, reconnecting the app, or
-opening a new workspace. The same workspace ID and multi-request process tools
-continued to work after restart.
-
-Set `LOCALSPACE_MCP_TRANSPORT_MODE=stateful` only when a client needs a
-session-scoped SSE transport. In stateful mode, a server restart clears the
-in-memory transport registry, so requests that still carry an old
-`Mcp-Session-Id` receive HTTP 404 and a `mcp_session_not_found` log entry.
-
-| Variable | Default |
-| --- | --- |
-| `LOCALSPACE_MCP_SESSION_IDLE_TTL_MS` | `14400000` |
-| `LOCALSPACE_MCP_SESSION_CLEANUP_INTERVAL_MS` | `60000` |
-| `LOCALSPACE_MCP_MAX_SESSIONS` | `128` |
-
-When a session is idle past the TTL, LocalSpace closes and removes it. When the
-session cap is exceeded, the least recently used session is removed first. MCP
-clients can reconnect and call `open_workspace` again if they try to use a
-session that has already expired.
+- 2026-07-28 协议（`server/discover` + 逐请求 `_meta` 信封，需带 `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` 头）由 `@modelcontextprotocol/server` 的 `createMcpHandler` 服务；`server/discover` 返回服务端 instructions。
+- 2025 时代协议（`initialize` 握手，2024-10-07 … 2025-11-25）每个 POST 新建 server + 无状态 transport，直接回 `application/json`；GET/DELETE 返回 405。
+- 客户端断开即中止该请求的 js 程序，并杀掉其 worker 与进程组。
+- `LOCALSPACE_TRAFFIC_LOG=0` 关闭完整流量日志；日志含请求头，`authorization`/`cookie` 记为 `[redacted]`。
 
 ## Tool Concurrency
 

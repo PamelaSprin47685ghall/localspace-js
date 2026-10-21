@@ -175,7 +175,7 @@ function runCli(args: readonly string[], configDir: string): CliRunResult {
     configDir?: string;
     runtime?: { nodeSupported?: boolean; supportedRange?: string };
     sqliteNative?: { ok?: boolean };
-    server?: { localMcpUrl?: string; publicMcpUrl?: string; mcpTransportMode?: string };
+    server?: { localMcpUrl?: string; publicMcpUrl?: string };
   };
   assert.equal(report.configDir, configDir);
   assert.equal(report.runtime?.nodeSupported, true);

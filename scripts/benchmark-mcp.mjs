@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/client";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "../src/oauth-store.ts";
 import { createServer } from "../src/server.ts";
 
@@ -297,7 +297,6 @@ function benchmarkConfig(root) {
     toolMode: "hybrid",
     toolPacks: [],
     widgets: "off",
-    mcpTransportMode: "stateless",
     stateDir,
     worktreeRoot: join(root, ".benchmark-worktrees"),
     skillsEnabled: false,
@@ -316,11 +315,6 @@ function benchmarkConfig(root) {
       enabled: false,
       path: join(stateDir, "audit.jsonl"),
       maxMemoryEvents: 100,
-    },
-    mcpSessions: {
-      idleTtlMs: 60_000,
-      cleanupIntervalMs: 0,
-      maxSessions: 16,
     },
     concurrency: {
       maxConcurrentToolCalls: 8,

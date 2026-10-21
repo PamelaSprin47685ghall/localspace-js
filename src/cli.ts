@@ -240,7 +240,6 @@ async function serve(): Promise<void> {
     console.log(`public base url: ${config.publicBaseUrl}`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`allowed hosts: ${config.allowedHosts.join(", ")}`);
-    console.log(`mcp transport: ${config.mcpTransportMode}`);
     if (config.allowedHosts.includes("*")) {
       console.warn("warning: Host header allowlist is disabled because LOCALSPACE_ALLOWED_HOSTS=*");
     }
@@ -290,7 +289,6 @@ interface DoctorReport {
     publicMcpUrl: string;
     allowedRoots: string[];
     allowedHosts: string[];
-    mcpTransportMode: string;
   };
   configError?: string;
 }
@@ -330,7 +328,6 @@ function buildDoctorReport(): DoctorReport {
       publicMcpUrl: new URL("/mcp", config.publicBaseUrl).toString(),
       allowedRoots: [...config.allowedRoots],
       allowedHosts: [...config.allowedHosts],
-      mcpTransportMode: config.mcpTransportMode,
     };
   } catch (error) {
     report.configError = error instanceof Error ? error.message : String(error);
@@ -363,7 +360,6 @@ function printDoctorText(report: DoctorReport): void {
     console.log(`Public MCP URL: ${report.server.publicMcpUrl}`);
     console.log(`Allowed roots: ${report.server.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${report.server.allowedHosts.join(", ")}`);
-    console.log(`MCP transport: ${report.server.mcpTransportMode}`);
   } else if (report.configError) {
     console.log(`Config status: ${report.configError}`);
   }

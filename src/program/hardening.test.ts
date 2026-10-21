@@ -63,7 +63,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
   assert.ok(Date.now() - started < 3000);
   assert.ok(ticks >= 10, `main loop ticked only ${ticks} times`);
   // resuming a still-busy program yields again at the next budget instead of hanging
-  const again = await table.take(parked.parked!.handle)!.resume(undefined);
+  const again = await table.take(parked.parked!.handle)!.resume(undefined, 1000);
   assert.equal(again.parked?.kind, "yield");
   await table.take(again.parked!.handle)!.abandon();
   await sleep(100);

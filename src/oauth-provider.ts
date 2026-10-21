@@ -1,15 +1,24 @@
 import { timingSafeEqual, randomBytes, randomUUID, createHash } from "node:crypto";
 import type { Response } from "express";
-import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
-import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
-import { AccessDeniedError, InvalidGrantError, InvalidRequestError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import type {
-  OAuthClientInformationFull,
-  OAuthTokenRevocationRequest,
-  OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
-import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
+// Authorization Server: v1's frozen AS helpers (server-legacy/auth). Resource Server side is v2 (OAuthError).
+import {
+  AccessDeniedError,
+  InvalidGrantError,
+  InvalidRequestError,
+  type AuthorizationParams,
+  type OAuthRegisteredClientsStore,
+  type OAuthServerProvider,
+} from "@modelcontextprotocol/server-legacy/auth";
+import {
+  OAuthError,
+  OAuthErrorCode,
+  checkResourceAllowed,
+  resourceUrlFromServerUrl,
+  type AuthInfo,
+  type OAuthClientInformationFull,
+  type OAuthTokenRevocationRequest,
+  type OAuthTokens,
+} from "@modelcontextprotocol/server";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
 
 export interface OAuthConfig {
@@ -238,7 +247,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const record = this.oauthStore.getAccessToken(hashToken(token));
     if (!record || record.expiresAt < Math.floor(Date.now() / 1000)) {
-      throw new InvalidTokenError("Invalid or expired access token");
+      throw new OAuthError(OAuthErrorCode.InvalidToken, "Invalid or expired access token");
     }
 
     return {

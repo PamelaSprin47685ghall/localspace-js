@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { spawnSync } from "node:child_process";
 import type { ServerConfig } from "../config.js";
@@ -29,15 +29,15 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       title: "打开工作区",
       description:
         "打开允许根内的本地项目目录或托管 worktree，返回 workspaceId、总纲与 API 速查。同一文件夹不要重复打开，除非 workspaceId 失效或切换目录。",
-      inputSchema: {
+      inputSchema: z.object({
         path: z.string().describe("绝对路径，或 ~/… 形式的家目录路径。"),
         mode: z
           .enum(["checkout", "worktree"])
           .optional()
           .describe("默认 checkout。worktree 创建隔离的托管 Git worktree。"),
         baseRef: z.string().optional().describe("worktree 的基础 Git ref，默认 HEAD。"),
-      },
-      outputSchema: {
+      }),
+      outputSchema: z.object({
         workspaceId: z.string(),
         root: z.string(),
         mode: z.enum(["checkout", "worktree"]),
@@ -45,7 +45,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         guideline: z.string(),
         apiBrief: z.string(),
         agentsFiles: z.array(z.object({ path: z.string(), content: z.string() })),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef }) => {
@@ -127,7 +127,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         "写入立即落盘；危险操作与 where 歧义会 park。" +
         "自动 park 时限按 planB 计价：planB 的 UTF-8 字节数 ÷ 20 = 秒数，空 planB 立刻 park。" +
         "互不相干的任务可在同一轮并行调用多个 js。",
-      inputSchema: {
+      inputSchema: z.object({
         workspaceId: z.string().describe("open_workspace 返回的工作区标识。"),
         program: z.string().min(1).describe("平铺的异步 JavaScript 程序体，可直接 await 顶层。"),
         planB: z
@@ -137,8 +137,8 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
               "这是买时间的钱：每 20 字节换 1 秒，用完就自动 park。跑得越久越烦，每多等一秒都要多写 20 字节来证明值得。" +
               "表达完整就停笔，别凑字。写完若发现这个办法已经够用，就直接采用它，不要再跑这段程序。",
           ),
-      },
-      outputSchema: {
+      }),
+      outputSchema: z.object({
         status: z.enum(["done", "parked", "failed", "abandoned"]),
         value: z.unknown().optional(),
         error: z.object({ code: z.string(), message: z.string() }).optional(),
@@ -152,10 +152,10 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           })
           .optional(),
         written: z.array(z.string()),
-      },
+      }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ workspaceId, program, planB }, extra) => {
+    async ({ workspaceId, program, planB }, ctx) => {
       const budget = { bytes: Buffer.byteLength(planB, "utf8"), ms: Buffer.byteLength(planB, "utf8") * 50 };
       const startedAt = performance.now();
       try {
@@ -169,7 +169,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           program,
           yieldBudgetMs: budget.ms,
           planB,
-          signal: extra.signal,
+          signal: ctx.mcpReq.signal,
         });
 
         const summary = formatJsResult(result);

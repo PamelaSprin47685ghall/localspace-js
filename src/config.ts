@@ -6,14 +6,6 @@ import type { LoggingConfig, LogFormat, LogLevel, TrustProxy } from "./logger.js
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadLocalspaceFiles } from "./user-config.js";
 import { defaultAuditLogPath, type AuditLogConfig } from "./audit-log.js";
-import {
-  DEFAULT_MCP_MAX_SESSIONS,
-  DEFAULT_MCP_SESSION_CLEANUP_INTERVAL_MS,
-  DEFAULT_MCP_SESSION_IDLE_TTL_MS,
-  type McpSessionConfig,
-} from "./mcp-session-registry.js";
-
-export type McpTransportMode = "stateful" | "stateless";
 export type AuthMode = "oauth" | "none";
 export interface ToolConcurrencyConfig {
   maxConcurrentToolCalls: number;
@@ -40,7 +32,6 @@ export interface ServerConfig {
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
-  mcpTransportMode: McpTransportMode;
   stateDir: string;
   worktreeRoot: string;
   skillsEnabled: boolean;
@@ -49,7 +40,6 @@ export interface ServerConfig {
   shell?: string;
   logging: LoggingConfig;
   audit: AuditLogConfig;
-  mcpSessions: McpSessionConfig;
   concurrency: ToolConcurrencyConfig;
   parkTtlMs: number;
   configDir: string;
@@ -210,26 +200,6 @@ function parseAuditConfig(env: NodeJS.ProcessEnv, stateDir: string): AuditLogCon
   };
 }
 
-function parseMcpSessionConfig(env: NodeJS.ProcessEnv): McpSessionConfig {
-  return {
-    idleTtlMs: parsePositiveInteger(
-      env.LOCALSPACE_MCP_SESSION_IDLE_TTL_MS,
-      DEFAULT_MCP_SESSION_IDLE_TTL_MS,
-      "LOCALSPACE_MCP_SESSION_IDLE_TTL_MS",
-    ),
-    cleanupIntervalMs: parsePositiveInteger(
-      env.LOCALSPACE_MCP_SESSION_CLEANUP_INTERVAL_MS,
-      DEFAULT_MCP_SESSION_CLEANUP_INTERVAL_MS,
-      "LOCALSPACE_MCP_SESSION_CLEANUP_INTERVAL_MS",
-    ),
-    maxSessions: parsePositiveInteger(
-      env.LOCALSPACE_MCP_MAX_SESSIONS,
-      DEFAULT_MCP_MAX_SESSIONS,
-      "LOCALSPACE_MCP_MAX_SESSIONS",
-    ),
-  };
-}
-
 function parseToolConcurrencyConfig(env: NodeJS.ProcessEnv): ToolConcurrencyConfig {
   return {
     maxConcurrentToolCalls: parsePositiveInteger(
@@ -258,13 +228,6 @@ function parseToolConcurrencyConfig(env: NodeJS.ProcessEnv): ToolConcurrencyConf
       "LOCALSPACE_TOOL_QUEUE_TIMEOUT_MS",
     ),
   };
-}
-
-function parseMcpTransportMode(value: string | undefined): McpTransportMode {
-  if (!value || value === "stateless") return "stateless";
-  if (value === "stateful") return "stateful";
-
-  throw new Error(`Invalid LOCALSPACE_MCP_TRANSPORT_MODE: ${value}`);
 }
 
 
@@ -348,7 +311,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: parseAllowedHosts(env.LOCALSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
     authMode: parseAuthMode(env),
-    mcpTransportMode: parseMcpTransportMode(env.LOCALSPACE_MCP_TRANSPORT_MODE),
     stateDir,
     configDir: resolve(expandHomePath(env.LOCALSPACE_CONFIG_DIR ?? join(homedir(), ".localspace"))),
     parkTtlMs: parsePositiveInteger(env.LOCALSPACE_PARK_TTL_MS, 1_800_000, "LOCALSPACE_PARK_TTL_MS"),
@@ -359,7 +321,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     shell: parseOptionalPath(env.LOCALSPACE_SHELL ?? files.config.shell),
     logging: parseLoggingConfig(env, files.config.trustProxy),
     audit: parseAuditConfig(env, stateDir),
-    mcpSessions: parseMcpSessionConfig(env),
     concurrency: parseToolConcurrencyConfig(env),
   };
 }

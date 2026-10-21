@@ -142,57 +142,6 @@ project.
 Workspace session metadata is persisted, but clients should still treat
 `open_workspace` as the way to begin a fresh working session.
 
-## Long-Running Server Memory Growth
-
-If LocalSpace runs for many hours while an MCP client repeatedly reconnects,
-stale MCP transports can accumulate when a browser tab or tunnel does not close
-the old session cleanly. LocalSpace now bounds this state with idle cleanup and a
-maximum active MCP session cap. See `LOCALSPACE_MCP_SESSION_IDLE_TTL_MS`,
-`LOCALSPACE_MCP_SESSION_CLEANUP_INTERVAL_MS`, and
-`LOCALSPACE_MCP_MAX_SESSIONS` in `configuration.md`.
-
-If a client tries to use a session that has expired, reconnect the MCP server in
-the client and call `open_workspace` again.
-
-## Tool Becomes Disabled After a Server Restart
-
-Stateful MCP transports live in memory. After LocalSpace restarts, a request
-that still carries a session ID from the previous process is rejected with HTTP
-404. LocalSpace logs this as `mcp_session_not_found`, including only a shortened
-session ID prefix.
-
-That 404 is the protocol signal a client can use to establish a new MCP session,
-but whether a particular ChatGPT conversation automatically retries
-initialization must be verified from request logs rather than assumed.
-
-LocalSpace now defaults to stateless MCP transport, which avoids binding a
-conversation to an in-memory transport session:
-
-```bash
-node dist/cli.js serve
-```
-
-Stateless mode creates a fresh MCP server and transport for every request and
-does not issue session IDs. It accepts POST requests with direct JSON responses;
-GET and DELETE return HTTP 405 because stateless requests do not have a shared
-SSE stream or deletable transport session.
-
-Local regression coverage verifies initialization, initialized notifications,
-tool and resource discovery, resource reads, concurrent requests, cross-request
-command approvals, and `exec_command`/`write_stdin` process polling. Real
-ChatGPT validation also confirmed that the same conversation and workspace ID
-continued working across two LocalSpace restarts without a page refresh or app
-reconnection.
-
-Stateful mode remains available for clients that require a session-scoped SSE
-transport:
-
-```bash
-LOCALSPACE_MCP_TRANSPORT_MODE=stateful node dist/cli.js serve
-```
-
-Stateful mode retains the restart limitation described above.
-
 ## Workspace Path Rejected
 
 The path must be inside one of the allowed roots configured during setup.
