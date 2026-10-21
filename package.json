@@ -1,14 +1,14 @@
 {
-  "name": "@alan512/localspace",
+  "name": "@pamelasprin47685ghall/localspace-js",
   "version": "2.0.0",
-  "description": "Expose a secure local coding workspace through an MCP server.",
-  "homepage": "https://github.com/Alan-512/localspace#readme",
+  "description": "LocalSpace JS \u5de5\u5177\u9762\uff1aopen_workspace + js \u7f16\u7a0b\u9762\uff08ChatGPT MCP\uff09\u3002",
+  "homepage": "https://github.com/PamelaSprin47685ghall/localspace-js#readme",
   "bugs": {
-    "url": "https://github.com/Alan-512/localspace/issues"
+    "url": "https://github.com/PamelaSprin47685ghall/localspace-js/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Alan-512/localspace.git"
+    "url": "git+https://github.com/PamelaSprin47685ghall/localspace-js.git"
   },
   "type": "module",
   "main": "dist/server.js",
@@ -25,19 +25,15 @@
     "scripts",
     "README.md"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && npm run build:app && tsc -p tsconfig.build.json",
-    "build:app": "vite build",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "benchmark:mcp": "tsx scripts/benchmark-mcp.mjs",
     "dev": "node scripts/dev-server.mjs",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js serve",
     "validate:package": "node scripts/validate-package-install.mjs",
-    "test": "tsx src/config.test.ts && tsx src/init-options.test.ts && tsx src/runtime-dependencies.test.ts && tsx src/ui/card-types.test.ts && tsx src/ui/patch-display.test.ts && tsx src/workspace-app-resource.test.ts && tsx src/apply-patch.test.ts && tsx src/local-tools.test.ts && tsx src/project-map.test.ts && tsx src/symbols.test.ts && tsx src/code-navigation.test.ts && tsx src/code-map.test.ts && tsx src/entrypoints.test.ts && tsx src/diagnostics.test.ts && tsx src/tool-catalog.test.ts && tsx src/concurrency.test.ts && tsx src/tool-concurrency.test.ts && tsx src/read-many.test.ts && tsx src/package-checks.test.ts && tsx src/workspace-revision.test.ts && tsx src/check-sessions.test.ts && tsx src/code-intelligence.test.ts && tsx src/workspace-policy.test.ts && tsx src/deterministic-automation.test.ts && tsx src/activity-log.test.ts && tsx src/request-metrics.test.ts && tsx src/server-output-schema.test.ts && tsx src/command-safety.test.ts && tsx src/command-approval.test.ts && tsx src/sensitive-paths.test.ts && tsx src/audit-log.test.ts && tsx src/workflow-tools.test.ts && tsx src/task-summary.test.ts && tsx src/final-report.test.ts && tsx src/git-changes.test.ts && tsx src/git-tools.test.ts && tsx src/process-platform.test.ts && tsx src/process-sessions.test.ts && tsx src/mcp-session-registry.test.ts && tsx src/server-shutdown.test.ts && tsx src/mcp-client-contract.test.ts && tsx src/mcp-server-restart.test.ts && tsx src/roots.test.ts && tsx src/skills.test.ts && tsx src/workspaces.test.ts && tsx src/review-checkpoints.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
+    "test": "tsx src/config.test.ts && tsx src/program/program.test.ts && tsx src/roots.test.ts && tsx src/workspaces.test.ts && tsx src/concurrency.test.ts && tsx src/audit-log.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [

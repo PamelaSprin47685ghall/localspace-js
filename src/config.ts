@@ -13,10 +13,8 @@ import {
   type McpSessionConfig,
 } from "./mcp-session-registry.js";
 
-export type ToolMode = "minimal" | "full" | "codex" | "hybrid";
-export type ToolPack = "code-intelligence";
-export type WidgetMode = "off" | "changes" | "full";
 export type McpTransportMode = "stateful" | "stateless";
+export type AuthMode = "oauth" | "none";
 export interface ToolConcurrencyConfig {
   maxConcurrentToolCalls: number;
   maxConcurrentScans: number;
@@ -38,12 +36,10 @@ export interface ServerConfig {
   host: string;
   port: number;
   oauth: OAuthConfig;
+  authMode: AuthMode;
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
-  toolMode: ToolMode;
-  toolPacks: ToolPack[];
-  widgets: WidgetMode;
   mcpTransportMode: McpTransportMode;
   stateDir: string;
   worktreeRoot: string;
@@ -55,6 +51,9 @@ export interface ServerConfig {
   audit: AuditLogConfig;
   mcpSessions: McpSessionConfig;
   concurrency: ToolConcurrencyConfig;
+  yieldBudgetMs: number;
+  parkTtlMs: number;
+  configDir: string;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -104,35 +103,18 @@ function normalizeAllowedHosts(rawHosts: string[], derivedHosts: string[]): stri
   return Array.from(new Set(hosts.map((host) => host.trim()).filter(Boolean)));
 }
 
+function parseAuthMode(env: NodeJS.ProcessEnv): AuthMode {
+  const mode = env.LOCALSPACE_AUTH_MODE;
+  if (mode === "none" || mode === "oauth") return mode;
+  if (mode) throw new Error(`Invalid LOCALSPACE_AUTH_MODE: ${mode}`);
+  return "oauth";
+}
+
 function parseBoolean(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
 
-function parseToolMode(env: NodeJS.ProcessEnv): ToolMode {
-  const mode = env.LOCALSPACE_TOOL_MODE;
-  if (mode === "minimal" || mode === "full" || mode === "codex" || mode === "hybrid") return mode;
-  if (mode) throw new Error(`Invalid LOCALSPACE_TOOL_MODE: ${mode}`);
 
-  if (env.LOCALSPACE_MINIMAL_TOOLS !== undefined) {
-    return parseBoolean(env.LOCALSPACE_MINIMAL_TOOLS) ? "minimal" : "full";
-  }
-  return "hybrid";
-}
-
-function parseToolPacks(value: string | undefined): ToolPack[] {
-  const entries = value
-    ?.split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean) ?? [];
-  const packs = new Set<ToolPack>();
-  for (const entry of entries) {
-    if (entry !== "code-intelligence") {
-      throw new Error(`Invalid LOCALSPACE_TOOL_PACKS entry: ${entry}`);
-    }
-    packs.add(entry);
-  }
-  return [...packs];
-}
 
 function parseLogLevel(value: string | undefined): LogLevel {
   if (!value || value === "info") return "info";
@@ -260,12 +242,6 @@ function parseMcpTransportMode(value: string | undefined): McpTransportMode {
   throw new Error(`Invalid LOCALSPACE_MCP_TRANSPORT_MODE: ${value}`);
 }
 
-function parseWidgetMode(value: string | undefined): WidgetMode {
-  if (!value || value === "changes") return "changes";
-  if (value === "off" || value === "full") return value;
-
-  throw new Error(`Invalid LOCALSPACE_WIDGETS: ${value}`);
-}
 
 function parseRequiredSecret(value: string | undefined, name: string): string {
   const secret = value?.trim();
@@ -346,11 +322,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedRoots: parseAllowedRoots(env.LOCALSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.LOCALSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
-    toolMode: parseToolMode(env),
-    toolPacks: parseToolPacks(env.LOCALSPACE_TOOL_PACKS),
-    widgets: parseWidgetMode(env.LOCALSPACE_WIDGETS),
+    authMode: parseAuthMode(env),
     mcpTransportMode: parseMcpTransportMode(env.LOCALSPACE_MCP_TRANSPORT_MODE),
     stateDir,
+    configDir: resolve(expandHomePath(env.LOCALSPACE_CONFIG_DIR ?? join(homedir(), ".localspace"))),
+    yieldBudgetMs: parsePositiveInteger(env.LOCALSPACE_YIELD_BUDGET_MS, 30_000, "LOCALSPACE_YIELD_BUDGET_MS"),
+    parkTtlMs: parsePositiveInteger(env.LOCALSPACE_PARK_TTL_MS, 1_800_000, "LOCALSPACE_PARK_TTL_MS"),
     worktreeRoot: resolve(expandHomePath(env.LOCALSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     skillsEnabled: env.LOCALSPACE_SKILLS === undefined ? true : parseBoolean(env.LOCALSPACE_SKILLS),
     skillPaths: parsePathList(env.LOCALSPACE_SKILL_PATHS),
