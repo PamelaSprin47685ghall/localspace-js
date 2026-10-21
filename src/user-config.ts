@@ -19,6 +19,8 @@ export interface LocalspaceUserConfig {
   worktreeRoot?: string;
   agentDir?: string;
   shell?: string;
+  /** Express trust proxy: false | true(=loopback) | hop count | "loopback" / CIDR list. */
+  trustProxy?: string | number | boolean;
 }
 
 export interface LocalspaceAuthConfig {

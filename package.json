@@ -1,7 +1,7 @@
 {
   "name": "@pamelasprin47685ghall/localspace-js",
   "version": "2.0.0",
-  "description": "LocalSpace JS \u5de5\u5177\u9762\uff1aopen_workspace + js \u7f16\u7a0b\u9762\uff08ChatGPT MCP\uff09\u3002",
+  "description": "LocalSpace JS 工具面：open_workspace + js 编程面（ChatGPT MCP）。",
   "homepage": "https://github.com/PamelaSprin47685ghall/localspace-js#readme",
   "bugs": {
     "url": "https://github.com/PamelaSprin47685ghall/localspace-js/issues"
@@ -33,7 +33,7 @@
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js serve",
     "validate:package": "node scripts/validate-package-install.mjs",
-    "test": "tsx src/config.test.ts && tsx src/program/program.test.ts && tsx src/roots.test.ts && tsx src/workspaces.test.ts && tsx src/concurrency.test.ts && tsx src/audit-log.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
+    "test": "tsx src/config.test.ts && tsx src/trust-proxy.test.ts && tsx src/program/program.test.ts && tsx src/roots.test.ts && tsx src/workspaces.test.ts && tsx src/concurrency.test.ts && tsx src/audit-log.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [

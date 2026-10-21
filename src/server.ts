@@ -48,7 +48,7 @@ function sendJsonRpcError(res: Response, status: number, code: number, message: 
 
 function requestLogFields(req: Request, config: ServerConfig): Record<string, unknown> {
   return {
-    ip: requestIp(req, config.logging.trustProxy),
+    ip: requestIp(req),
     host: req.headers.host,
     userAgent: req.headers["user-agent"],
     publicBaseUrl: config.publicBaseUrl,
@@ -138,8 +138,9 @@ export function createServer(config = loadConfig()): RunningServer {
   const auditLog = new AuditLogManager(config.audit);
   const activityLog = new ToolActivityLogManager(config.audit.maxMemoryEvents);
   const requestMetrics = new McpRequestMetricsManager(config.audit.maxMemoryEvents);
-  if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
+  // Trust only the real proxy hop(s) so req.ip (and express-rate-limit keys) is the real client IP.
+  if (config.logging.trustProxy !== false) {
+    app.set("trust proxy", config.logging.trustProxy);
   }
 
   app.use((req, res, next) => {

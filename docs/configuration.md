@@ -601,6 +601,12 @@ localspace serve
 | `LOCALSPACE_LOG_SHELL_COMMANDS` | `0` |
 | `LOCALSPACE_TRUST_PROXY` | `0` |
 
+`LOCALSPACE_TRUST_PROXY` (or `trustProxy` in `config.json`) sets Express `trust proxy`.
+`1`/`true` means `loopback`: trust only a reverse proxy or tunnel client (frpc, cloudflared,
+nginx) on this machine, so the real client IP comes from its `X-Forwarded-For`. Use
+`hops:N` for N proxy hops, or an explicit list such as `loopback,10.0.0.0/8`. Never
+trust every hop: that lets anyone spoof `X-Forwarded-For` and bypass rate limits.
+
 Set `LOCALSPACE_LOG_FORMAT=pretty` for local debugging.
 
 Set `LOCALSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command

@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { expandHomePath } from "./roots.js";
-import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
+import type { LoggingConfig, LogFormat, LogLevel, TrustProxy } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { loadLocalspaceFiles } from "./user-config.js";
 import { defaultAuditLogPath, type AuditLogConfig } from "./audit-log.js";
@@ -165,7 +165,33 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   return parsed;
 }
 
-function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
+/**
+ * Express `trust proxy` setting. Trust only the real proxy hop(s), never everyone:
+ * unset/0/false -> false; 1/true/yes/on (legacy flag) -> "loopback" (proxy/tunnel on this host);
+ * integer N>=1 given as "hops:N" -> N hops; anything else is passed through to Express
+ * (e.g. "loopback", "10.0.0.0/8,127.0.0.1").
+ */
+export function parseTrustProxy(value: string | number | boolean | undefined): TrustProxy {
+  if (value === undefined || value === false || value === "" || value === 0) return false;
+  if (value === true) return "loopback";
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 1) throw new Error(`Invalid trustProxy: ${value}`);
+    return value;
+  }
+  const raw = value.trim();
+  const lower = raw.toLowerCase();
+  if (["0", "false", "no", "off"].includes(lower)) return false;
+  if (["1", "true", "yes", "on"].includes(lower)) return "loopback";
+  const hops = /^hops:(\d+)$/.exec(lower);
+  if (hops) {
+    const n = Number(hops[1]);
+    if (n < 1) throw new Error(`Invalid trustProxy: ${raw}`);
+    return n;
+  }
+  return raw;
+}
+
+function parseLoggingConfig(env: NodeJS.ProcessEnv, fileTrustProxy?: string | number | boolean): LoggingConfig {
   return {
     level: parseLogLevel(env.LOCALSPACE_LOG_LEVEL),
     format: parseLogFormat(env.LOCALSPACE_LOG_FORMAT),
@@ -173,7 +199,7 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
     assets: parseBoolean(env.LOCALSPACE_LOG_ASSETS),
     toolCalls: env.LOCALSPACE_LOG_TOOL_CALLS === undefined ? true : parseBoolean(env.LOCALSPACE_LOG_TOOL_CALLS),
     shellCommands: parseBoolean(env.LOCALSPACE_LOG_SHELL_COMMANDS),
-    trustProxy: parseBoolean(env.LOCALSPACE_TRUST_PROXY),
+    trustProxy: parseTrustProxy(env.LOCALSPACE_TRUST_PROXY ?? fileTrustProxy),
   };
 }
 
@@ -333,7 +359,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     skillPaths: parsePathList(env.LOCALSPACE_SKILL_PATHS),
     agentDir: resolve(expandHomePath(env.LOCALSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
     shell: parseOptionalPath(env.LOCALSPACE_SHELL ?? files.config.shell),
-    logging: parseLoggingConfig(env),
+    logging: parseLoggingConfig(env, files.config.trustProxy),
     audit: parseAuditConfig(env, stateDir),
     mcpSessions: parseMcpSessionConfig(env),
     concurrency: parseToolConcurrencyConfig(env),
