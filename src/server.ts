@@ -20,6 +20,7 @@ import { WorkspaceRegistry } from "./workspaces.js";
 import { McpSessionRegistry, type McpSessionRegistryEvent } from "./mcp-session-registry.js";
 import { AuditLogManager } from "./audit-log.js";
 import { ToolActivityLogManager } from "./activity-log.js";
+import { trafficLog } from "./traffic-log.js";
 import { McpRequestMetricsManager, type RequestConnectionOutcome } from "./request-metrics.js";
 import { registerJsSurface } from "./program/tools.js";
 import { globalParkTable } from "./program/park.js";
@@ -201,6 +202,8 @@ export function createServer(config = loadConfig()): RunningServer {
       parked: globalParkTable.size,
     });
   });
+
+  app.use("/mcp", trafficLog(config.stateDir, !/^(0|false|off)$/i.test(process.env.LOCALSPACE_TRAFFIC_LOG ?? "")));
 
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
