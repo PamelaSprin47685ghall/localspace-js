@@ -83,6 +83,7 @@ export async function runProgram(input: RunProgramInput): Promise<RunProgramResu
   };
 
   const apiCore = createProgramApi(ctx);
+  const { dispose, ...apiSurface } = apiCore as typeof apiCore & { dispose: () => void };
 
   const unpark = async (handle: string, value?: unknown): Promise<unknown> => {
     const site = parkTable.take(handle);
@@ -112,42 +113,89 @@ export async function runProgram(input: RunProgramInput): Promise<RunProgramResu
     await site.abandon();
   };
 
-  const api = { ...apiCore, unpark, abandon };
+  // 万象术风格：全部原语挂在 this 上（this.cat / this.call / this.unpark …）
+  const api = { ...apiSurface, unpark, abandon };
+
+  const settle = (result: RunProgramResult): RunProgramResult => {
+    if (result.status !== "parked") dispose();
+    finalize(result);
+    return result;
+  };
 
   const execPromise = (async (): Promise<RunProgramResult> => {
     try {
       const value = await executeProgram(input.program, api);
       assertJsonCompatible(value ?? null);
-      const result: RunProgramResult = { status: "done", value: value ?? null, written: [...written] };
-      finalize(result);
-      return result;
+      return settle({ status: "done", value: value ?? null, written: [...written] });
     } catch (error) {
       if ((error as { repark?: RunProgramResult }).repark) {
+        // 本 program 仅转发他人的再次挂起；本 hub 可释放
+        dispose();
         const result = (error as { repark: RunProgramResult }).repark;
         finalize(result);
         return result;
       }
       if (isProgramError(error)) {
-        const result: RunProgramResult = {
+        return settle({
           status: error.code === "ABANDONED" ? "abandoned" : "failed",
           error: { code: error.code, message: error.message },
           written: [...written],
-        };
-        finalize(result);
-        return result;
+        });
       }
-      const result: RunProgramResult = {
+      return settle({
         status: "failed",
         error: {
           code: "PROGRAM_ERROR",
           message: error instanceof Error ? error.message : String(error),
         },
         written: [...written],
-      };
-      finalize(result);
-      return result;
+      });
     }
   })();
+
+  function emitPark(
+    kind: "where" | "park" | "confirm" | "yield",
+    payload: unknown,
+    waiter: { resolve: (value: unknown) => void; reject: (error: unknown) => void },
+  ): RunProgramResult {
+    const site = parkTable.create(
+      input.workspaceId,
+      kind,
+      payload,
+      async (value) => {
+        deadlineMs = Date.now() + yieldBudgetMs;
+        ctx.deadlineMs = deadlineMs;
+        waiter.resolve(value);
+        while (true) {
+          if (parkedKind && parkWaiter) {
+            const reKind = parkedKind!;
+            const rePayload = parkedPayload;
+            const reWaiter = parkWaiter!;
+            parkedKind = undefined;
+            parkedPayload = undefined;
+            parkWaiter = undefined;
+            return emitPark(reKind, rePayload, reWaiter);
+          }
+          const settled = await raceSettled(outcomePromise, 20);
+          if (settled) return settled;
+        }
+      },
+      async () => {
+        waiter.reject(new ProgramError("ABANDONED", "现场已放弃"));
+        dispose();
+        finalize({
+          status: "abandoned",
+          error: { code: "ABANDONED", message: "现场已放弃" },
+          written: [...written],
+        });
+      },
+      {
+        elapsedMs: Date.now() - startedAt,
+        progress: kind === "yield" ? { phase: "yield" } : undefined,
+      },
+    );
+    return { status: "parked", parked: toView(site), written: [...written] };
+  }
 
   while (true) {
     if (parkedKind && parkWaiter) {
@@ -158,36 +206,13 @@ export async function runProgram(input: RunProgramInput): Promise<RunProgramResu
       parkedPayload = undefined;
       parkWaiter = undefined;
 
-      const site = parkTable.create(
-        input.workspaceId,
-        kind,
-        payload,
-        async (value) => {
-          deadlineMs = Date.now() + yieldBudgetMs;
-          ctx.deadlineMs = deadlineMs;
-          waiter.resolve(value);
-          return outcomePromise;
-        },
-        async () => {
-          waiter.reject(new ProgramError("ABANDONED", "现场已放弃"));
-          finalize({
-            status: "abandoned",
-            error: { code: "ABANDONED", message: "现场已放弃" },
-            written: [...written],
-          });
-        },
-        {
-          elapsedMs: Date.now() - startedAt,
-          progress: kind === "yield" ? { phase: "yield" } : undefined,
-        },
-      );
-
-      return { status: "parked", parked: toView(site), written: [...written] };
+      return emitPark(kind, payload, waiter);
     }
 
     const settled = await raceSettled(execPromise, 20);
     if (settled) return settled;
   }
+
 }
 
 async function raceSettled<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
@@ -213,16 +238,15 @@ async function executeProgram(
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
     ...args: string[]
   ) => (...args: unknown[]) => Promise<unknown>;
-  const names = Object.keys(api);
-  const values = names.map((name) => api[name]);
   let fn: (...args: unknown[]) => Promise<unknown>;
   try {
-    fn = new AsyncFunction(...names, `"use strict";\n${source}`);
+    // 程序体挂在 this 上：this.cat / this.call / this.unpark …
+    fn = new AsyncFunction(`"use strict";\n${source}`);
   } catch (error) {
     throw new ProgramError(
       "PROGRAM_SYNTAX",
       `程序语法错误：${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  return fn(...values);
+  return fn.call(api);
 }

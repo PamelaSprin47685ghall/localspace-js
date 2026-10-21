@@ -1,18 +1,13 @@
-import { spawn } from "node:child_process";
 import {
   mkdirSync,
-  readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { readFile, readdir, stat as fsStat } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { ProgramError } from "./errors.js";
 import {
-  analyzeCommandDanger,
   analyzePathDanger,
   assertInsideRoots,
   assertNotAuthFile,
@@ -21,8 +16,7 @@ import {
   type DangerHit,
 } from "./guard.js";
 import { nearestLine, whereAll, whereCandidates } from "./where.js";
-
-const STREAM_CAP = 128 * 1024;
+import { CallHub, type CallResult, type CallSpec } from "./call.js";
 
 export interface ApiContext {
   workspaceId: string;
@@ -34,16 +28,6 @@ export interface ApiContext {
   requestPark: (kind: "where" | "park" | "confirm" | "yield", payload: unknown) => Promise<unknown>;
   deadlineMs: number;
   checkYield: () => Promise<void>;
-}
-
-export interface CallResult {
-  exitCode: number | null;
-  signal?: string;
-  stdout: string;
-  stderr: string;
-  truncated: boolean;
-  bytes: { stdout: number; stderr: number };
-  durationMs: number;
 }
 
 export function createProgramApi(ctx: ApiContext) {
@@ -65,7 +49,7 @@ export function createProgramApi(ctx: ApiContext) {
     if (!accepted) {
       throw new ProgramError(
         "DANGEROUS_REQUIRES_FLAG",
-        `${hit.message} 请 unpark(handle, { dangerous: true }) 后继续。`,
+        `${hit.message} 请 this.unpark(handle, { dangerous: true }) 后继续。`,
       );
     }
   };
@@ -82,6 +66,16 @@ export function createProgramApi(ctx: ApiContext) {
     const rootHit = analyzePathDanger(absolute, ctx.allowedRoots);
     if (rootHit) await requireDanger(rootHit, forceDangerous);
   };
+
+  const hub = new CallHub({
+    get deadlineMs() {
+      return ctx.deadlineMs;
+    },
+    checkYield: () => ctx.checkYield(),
+    requestPark: (kind, payload) => ctx.requestPark(kind, payload),
+    requireDanger,
+    resolveCwd: (cwd) => resolvePath(cwd ?? "."),
+  });
 
   async function cat(path: string): Promise<string> {
     await ctx.checkYield();
@@ -137,20 +131,21 @@ export function createProgramApi(ctx: ApiContext) {
       ["--files", "--files-with-matches", "-l", "--count"].includes(a),
     );
     const args = summary ? [...argv] : ["--json", ...argv];
-    const result = await runProcess("rg", args, ctx.root, ctx.deadlineMs);
+    const cmd = ["rg", ...args].map(shellQuote).join(" ");
+    const result = await hub.call(cmd);
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       throw new ProgramError("RG_FAILED", result.stderr || `rg 退出码 ${result.exitCode}`);
     }
     if (summary) {
       return {
         exitCode: result.exitCode,
-        paths: result.stdout.split("\n").map((l) => l.trim()).filter(Boolean),
+        paths: result.stdout.split("\n").map((l: string) => l.trim()).filter(Boolean),
       };
     }
     const messages = result.stdout
       .split("\n")
       .filter(Boolean)
-      .map((line) => {
+      .map((line: string) => {
         try {
           return JSON.parse(line);
         } catch {
@@ -240,7 +235,7 @@ export function createProgramApi(ctx: ApiContext) {
       if (code === "ENOTEMPTY") {
         throw new ProgramError(
           "DIRECTORY_NOT_EMPTY",
-          `目录非空：${path}。递归删除请 rm(path, { recursive: true })。`,
+          `目录非空：${path}。递归删除请 this.rm(path, { recursive: true })。`,
         );
       }
       if (code === "ENOENT") throw new ProgramError("FILE_NOT_FOUND", `不存在：${path}`);
@@ -250,33 +245,10 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function call(
-    commandOrSpec: string | Record<string, unknown>,
+    commandOrSpec: CallSpec,
     opts: { cwd?: string; env?: Record<string, string>; dangerous?: boolean; timeoutMs?: number } = {},
   ): Promise<CallResult> {
-    await ctx.checkYield();
-    if (typeof commandOrSpec !== "string") {
-      throw new ProgramError(
-        "CALL_UNSUPPORTED",
-        "当前版本 call 仅支持字符串命令。请用 call(\"...\")。",
-      );
-    }
-    const hit = analyzeCommandDanger(commandOrSpec);
-    if (hit) await requireDanger(hit, opts.dangerous === true);
-    const cwd = resolvePath(opts.cwd ?? ".");
-    const remaining = Math.max(1, ctx.deadlineMs - Date.now());
-    const timeoutMs = Math.min(opts.timeoutMs ?? remaining, remaining);
-    const result = await runShell(commandOrSpec, cwd, timeoutMs, opts.env);
-    if (Date.now() >= ctx.deadlineMs) {
-      await ctx.requestPark("yield", {
-        message: "已达自动挂起时限。",
-        phase: "call",
-        command: commandOrSpec,
-        exitCode: result.exitCode,
-        stdoutTail: result.stdout.slice(-2000),
-        stderrTail: result.stderr.slice(-2000),
-      });
-    }
-    return result;
+    return hub.call(commandOrSpec, opts);
   }
 
   async function park(payload: unknown): Promise<unknown> {
@@ -296,119 +268,14 @@ export function createProgramApi(ctx: ApiContext) {
     rm: rmPath,
     call,
     park,
+    dispose: () => hub.dispose(),
   };
 }
 
-async function runShell(
-  command: string,
-  cwd: string,
-  timeoutMs: number,
-  env?: Record<string, string>,
-): Promise<CallResult> {
-  const started = Date.now();
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn("/bin/bash", ["-lc", command], {
-      cwd,
-      env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout = new HeadTail(STREAM_CAP);
-    const stderr = new HeadTail(STREAM_CAP);
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(new ProgramError("CALL_FAILED", error.message));
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolvePromise({
-        exitCode: code,
-        ...(signal ? { signal } : {}),
-        stdout: stdout.toString(),
-        stderr: stderr.toString(),
-        truncated: stdout.truncated || stderr.truncated,
-        bytes: { stdout: stdout.total, stderr: stderr.total },
-        durationMs: Date.now() - started,
-      } as CallResult);
-    });
-  });
+function shellQuote(value: string): string {
+  if (value.length === 0) return "''";
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'\''`)}'`;
 }
 
-async function runProcess(
-  command: string,
-  args: string[],
-  cwd: string,
-  deadlineMs: number,
-): Promise<CallResult> {
-  const timeoutMs = Math.max(1, deadlineMs - Date.now());
-  const started = Date.now();
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    const stdout = new HeadTail(STREAM_CAP);
-    const stderr = new HeadTail(STREAM_CAP);
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(new ProgramError("RG_FAILED", error.message));
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolvePromise({
-        exitCode: code,
-        ...(signal ? { signal } : {}),
-        stdout: stdout.toString(),
-        stderr: stderr.toString(),
-        truncated: stdout.truncated || stderr.truncated,
-        bytes: { stdout: stdout.total, stderr: stderr.total },
-        durationMs: Date.now() - started,
-      } as CallResult);
-    });
-  });
-}
-
-class HeadTail {
-  private head: Buffer[] = [];
-  private tail: Buffer[] = [];
-  private headBytes = 0;
-  private tailBytes = 0;
-  total = 0;
-  truncated = false;
-  constructor(private readonly cap: number) {}
-  push(chunk: Buffer) {
-    this.total += chunk.length;
-    if (this.headBytes < this.cap) {
-      const take = Math.min(chunk.length, this.cap - this.headBytes);
-      this.head.push(chunk.subarray(0, take));
-      this.headBytes += take;
-      if (take < chunk.length) {
-        this.truncated = true;
-        this.pushTail(chunk.subarray(take));
-      }
-      return;
-    }
-    this.truncated = true;
-    this.pushTail(chunk);
-  }
-  private pushTail(chunk: Buffer) {
-    this.tail.push(chunk);
-    this.tailBytes += chunk.length;
-    while (this.tailBytes > this.cap && this.tail.length > 1) {
-      const dropped = this.tail.shift()!;
-      this.tailBytes -= dropped.length;
-    }
-    if (this.tailBytes > this.cap && this.tail.length === 1) {
-      const only = this.tail[0]!;
-      this.tail[0] = only.subarray(only.length - this.cap);
-      this.tailBytes = this.cap;
-    }
-  }
-  toString() {
-    const head = Buffer.concat(this.head).toString("utf8");
-    if (!this.truncated) return head;
-    return `${head}\n/* …截断… */\n${Buffer.concat(this.tail).toString("utf8")}`;
-  }
-}
+export type { CallResult, CallSpec } from "./call.js";

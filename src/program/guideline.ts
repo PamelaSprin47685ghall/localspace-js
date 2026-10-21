@@ -11,15 +11,15 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 优先使用 \`js\`。需要打开或切换目录时先 \`open_workspace\`。不要寻找已退役的 read/edit/write/bash/exec_command。
 
-\`js\` 的输入只有 \`{ workspaceId, program }\`。\`program\` 是一段平铺的异步 JavaScript（不是 class）。程序里直接调用：
+\`js\` 的输入只有 \`{ workspaceId, program }\`。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
 
-- 读与搜：\`cat\`、\`stat\`、\`ls\`、\`rg(argv)\`、\`where\`、\`whereAll\`
-- 写：\`write\`、\`mkdir\`、\`mv\`、\`rm\`——立即落盘，不暂存、不回滚
-- 执行：\`call("命令")\`
-- 协商：\`park(payload)\`；定位歧义时 \`where\` 会自己 park
-- 恢复：\`unpark(handle, value)\`、\`abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段
+- 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.rg(argv)\`、\`this.where\`、\`this.whereAll\`
+- 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
+- 执行：\`this.call("命令")\`；亦可 spawn / send / signal / waitFor / read / join 长进程
+- 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
+- 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段
 
-长任务约每 30 秒自动 park（kind=yield），用 \`unpark(handle)\` 续跑。
+长任务约每 30 秒自动 park（kind=yield），用 \`this.unpark(handle)\` 续跑。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
 
@@ -27,15 +27,15 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 命令是仪器，目标才是义务。失败常常是中间观察。自行调查、修改、补测试、再验证。不要掩饰失败，不要粉饰成功。
 
-git 没有专用工具。需要时 \`call("git status")\` 等。输出在 JS 里处理；不要用管道丢掉前头的关键字节。
+git 没有专用工具。需要时 \`this.call("git status")\` 等。输出在 JS 里处理；不要用管道丢掉前头的关键字节。
 
 ## 定位与编辑
 
-用 \`where\` / \`whereAll\` 定位（空白跨行折叠），再切片重组后 \`write\`。零个或多个匹配时程序会 park，并带上 candidates / nearest——读 payload，选对的 span，\`unpark\` 注入即可。
+用 \`this.where\` / \`this.whereAll\` 定位（空白跨行折叠），再切片重组后 \`this.write\`。零个或多个匹配时程序会 park，并带上 candidates / nearest——读 payload，选对的 span，\`this.unpark\` 注入即可。
 
 ## 防呆
 
-少数危险操作会自动 park（kind=confirm）。在新 program 中 \`unpark(handle, { dangerous: true })\` 强制继续。硬性拒绝（不可覆盖）：路径越出允许根、改写 auth.json。
+少数危险操作会自动 park（kind=confirm）。在新 program 中 \`this.unpark(handle, { dangerous: true })\` 强制继续。硬性拒绝（不可覆盖）：路径越出允许根、改写 auth.json。
 
 除此以外系统不替你拦。写下去就是真的。
 
@@ -49,7 +49,7 @@ git 没有专用工具。需要时 \`call("git status")\` 等。输出在 JS 里
 
 ## 停止
 
-停止需要理由。park 现场不会自己消失——对每一个 handle 表态：\`unpark\` 或 \`abandon\`。
+停止需要理由。park 现场不会自己消失——对每一个 handle 表态：\`this.unpark\` 或 \`this.abandon\`。
 
 ## 结果里的 Host 提示
 
@@ -60,8 +60,8 @@ git 没有专用工具。需要时 \`call("git status")\` 等。输出在 JS 里
 ${GUIDELINE_MOTTO}
 `;
 
-export const API_BRIEF = `js 程序可用成员：
-cat(path) stat(path) ls(path) rg(argv) where(text,needle) whereAll(text,needle)
-write(path,content) mkdir(path) mv(from,to) rm(path[,{recursive}])
-call(command[,opts]) park(payload) unpark(handle,value) abandon(handle)
-写入立即落盘；危险操作会 park，unpark(handle,{dangerous:true}) 继续；每 30 秒自动 yield park。`;
+export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）：
+this.cat(path) this.stat(path) this.ls(path) this.rg(argv) this.where(text,needle) this.whereAll(text,needle)
+this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
+this.call(command|spec[,opts]) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
+call 支持 spawn/send/signal/waitFor/read/join；写入立即落盘；危险操作会 park，this.unpark(handle,{dangerous:true}) 继续；每 30 秒自动 yield park。`;

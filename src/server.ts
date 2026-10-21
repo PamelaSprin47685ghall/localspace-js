@@ -96,7 +96,8 @@ function createMcpServer(
     {
       instructions:
         "使用 open_workspace 打开目录，然后用 js 运行平铺的异步 JavaScript 程序。" +
-        "program 内可用 cat/stat/ls/rg/where/write/mkdir/mv/rm/call/park/unpark/abandon。" +
+        "全部原语均为 this 成员：this.cat/stat/ls/rg/where/write/mkdir/mv/rm/call/park，" +
+        "以及 this.unpark(handle,arg)/this.abandon(handle)。this.call 支持 spawn/send/signal/waitFor/read/join。" +
         "危险操作与 where 歧义会 park；约每 30 秒自动 yield。互不相干的任务可并行调用 js。" +
         "工具结果中 NUL+BOM 之后是 Host Pair Hint。",
     },

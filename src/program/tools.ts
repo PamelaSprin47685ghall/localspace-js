@@ -121,7 +121,9 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       title: "JS 编程面",
       description:
         "在工作区运行一段平铺的异步 JavaScript 程序。输入只有 workspaceId 与 program。" +
-        "程序内可用 cat/stat/ls/rg/where/whereAll/write/mkdir/mv/rm/call/park，以及 unpark(handle,value)/abandon(handle)。" +
+        "全部原语均为 this 成员：this.cat/stat/ls/rg/where/whereAll/write/mkdir/mv/rm/call/park，" +
+        "以及 this.unpark(handle,arg)/this.abandon(handle)。" +
+        "this.call 支持前台命令与 spawn/send/signal/waitFor/read/join。" +
         "写入立即落盘；危险操作与 where 歧义会 park；约每 30 秒自动 yield park。" +
         "互不相干的任务可在同一轮并行调用多个 js。",
       inputSchema: {

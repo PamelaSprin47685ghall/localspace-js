@@ -244,7 +244,7 @@ async function serve(): Promise<void> {
     if (config.allowedHosts.includes("*")) {
       console.warn("warning: Host header allowlist is disabled because LOCALSPACE_ALLOWED_HOSTS=*");
     }
-    console.log("auth: Owner password approval required");
+    console.log(`auth: ${config.authMode}`);
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
   });
 
