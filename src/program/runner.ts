@@ -1,6 +1,8 @@
-import { ProgramError, isProgramError } from "./errors.js";
-import { createProgramApi } from "./api.js";
-import { globalParkTable, toView, type ParkResumeResult, type ParkTable } from "./park.js";
+import { Worker } from "node:worker_threads";
+import { CallHub } from "./call.js";
+import { isProgramError } from "./errors.js";
+import { globalParkTable, toView, type ParkKind, type ParkResumeResult, type ParkTable } from "./park.js";
+import type { MainToWorker, ProgramEnd, WorkerInit, WorkerToMain } from "./protocol.js";
 
 export interface RunProgramInput {
   workspaceId: string;
@@ -11,242 +13,205 @@ export interface RunProgramInput {
   program: string;
   yieldBudgetMs?: number;
   parkTable?: ParkTable;
+  /** Aborted when the MCP request is cancelled or its connection drops: the run and its process groups die. */
+  signal?: AbortSignal;
 }
 
 export type RunProgramResult = ParkResumeResult;
 
-function assertJsonCompatible(value: unknown, path = "return"): void {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    (typeof value === "number" && Number.isFinite(value))
-  ) {
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJsonCompatible(item, `${path}[${index}]`));
-    return;
-  }
-  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    for (const [key, child] of Object.entries(value)) {
-      if (child === undefined) continue;
-      assertJsonCompatible(child, `${path}.${key}`);
-    }
-    return;
-  }
-  throw new ProgramError("INVALID_RETURN_VALUE", `返回值不是 JSON 兼容类型：${path}`);
+const FROM_SOURCE = import.meta.url.endsWith(".ts");
+const WORKER_URL = new URL(FROM_SOURCE ? "./worker.ts" : "./worker.js", import.meta.url);
+/** From source (tests/dev under tsx) the worker entry must register tsx before loading worker.ts. */
+const WORKER_ENTRY: string | URL = FROM_SOURCE
+  ? `import("tsx/esm/api").then((tsx) => tsx.tsImport(${JSON.stringify(WORKER_URL.href)}, ${JSON.stringify(import.meta.url)}))`
+  : WORKER_URL;
+const WORKER_HEAP_MB = 1024;
+const live = new Set<ProgramRun>();
+
+/** Server shutdown: kill every live program, its worker and its process groups. */
+export function shutdownPrograms(): void {
+  for (const run of [...live]) run.kill(endWith("failed", "SHUTDOWN", "服务关闭，程序已终止。"));
 }
 
+export function liveProgramCount(): number {
+  return live.size;
+}
+
+/**
+ * Run a program in its own worker thread. The main thread only brokers messages and keeps time:
+ * after `yieldBudgetMs` the request returns a yield park no matter what the program is doing
+ * (busy loop, never-resolving promise, long call).
+ */
 export async function runProgram(input: RunProgramInput): Promise<RunProgramResult> {
-  const parkTable = input.parkTable ?? globalParkTable;
-  const yieldBudgetMs = input.yieldBudgetMs ?? 30_000;
-  const written: string[] = [];
-  const startedAt = Date.now();
-  let deadlineMs = startedAt + yieldBudgetMs;
+  const run = new ProgramRun(input, input.parkTable ?? globalParkTable, input.yieldBudgetMs ?? 30_000);
+  const onAbort = () => run.kill(endWith("failed", "CANCELLED", "请求已取消，程序及其进程组已终止。"));
+  if (input.signal?.aborted) onAbort();
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await run.wait();
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+  }
+}
 
-  let parkedKind: "where" | "park" | "confirm" | "yield" | undefined;
-  let parkedPayload: unknown;
-  let parkWaiter: { resolve: (value: unknown) => void; reject: (error: unknown) => void } | undefined;
+type Event = Extract<WorkerToMain, { t: "park" | "end" }>;
 
-  let finalize!: (result: RunProgramResult) => void;
-  const outcomePromise = new Promise<RunProgramResult>((resolve) => {
-    finalize = resolve;
-  });
+class ProgramRun {
+  private readonly worker: Worker;
+  /** Child processes live on the main thread so they are always reaped and killable. */
+  private readonly hub: CallHub;
+  private readonly startedAt = Date.now();
+  private written: string[] = [];
+  private readonly events: Event[] = [];
+  private wake?: () => void;
+  private dead = false;
 
-  const requestPark = (kind: "where" | "park" | "confirm" | "yield", payload: unknown) =>
-    new Promise<unknown>((resolve, reject) => {
-      parkedKind = kind;
-      parkedPayload = payload;
-      parkWaiter = { resolve, reject };
+  constructor(
+    private readonly input: RunProgramInput,
+    private readonly parkTable: ParkTable,
+    private readonly budgetMs: number,
+  ) {
+    const init: WorkerInit = {
+      program: input.program,
+      ctx: {
+        workspaceId: input.workspaceId,
+        root: input.root,
+        allowedRoots: input.allowedRoots,
+        configDir: input.configDir,
+        stateDir: input.stateDir,
+      },
+    };
+    this.hub = new CallHub({ root: input.root });
+    this.worker = new Worker(WORKER_ENTRY, {
+      workerData: init,
+      resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB },
+      ...(FROM_SOURCE ? { eval: true } : {}),
+      stdout: false,
+      stderr: false,
     });
+    this.worker.on("message", (msg: WorkerToMain) => void this.onMessage(msg));
+    this.worker.on("error", (error: Error) => this.kill(endWith("failed", "WORKER_CRASHED", `程序线程崩溃：${error.message}`)));
+    this.worker.on("exit", (code) => this.kill(endWith("failed", "WORKER_EXITED", `程序线程退出（code ${code}）。`)));
+    live.add(this);
+  }
 
-  const checkYield = async () => {
-    if (Date.now() >= deadlineMs) {
-      await requestPark("yield", {
-        message: "已达 30 秒自动挂起。",
-        elapsedMs: Date.now() - startedAt,
-      });
+  /** Wait up to the budget for the next park/end; otherwise hand back a yield park. */
+  async wait(): Promise<RunProgramResult> {
+    const event = await this.next();
+    if (!event) return this.park("yield", { message: "已达自动挂起时限，程序仍在后台运行。", elapsedMs: Date.now() - this.startedAt });
+    if (event.t === "park") {
+      this.merge(event.written);
+      return this.park(event.kind, event.payload, event.id);
     }
-  };
+    return this.finish(event.end);
+  }
 
-  const ctx = {
-    workspaceId: input.workspaceId,
-    root: input.root,
-    allowedRoots: input.allowedRoots,
-    configDir: input.configDir,
-    stateDir: input.stateDir,
-    written,
-    requestPark,
-    deadlineMs,
-    checkYield,
-  };
+  /** Terminate the worker and every process group it started. Idempotent. */
+  kill(end: ProgramEnd): void {
+    if (this.dead) return;
+    this.dead = true;
+    live.delete(this);
+    this.hub.dispose();
+    void this.worker.terminate();
+    this.push({ t: "end", end });
+  }
 
-  const apiCore = createProgramApi(ctx);
-  const { dispose, ...apiSurface } = apiCore as typeof apiCore & { dispose: () => void };
+  private next(): Promise<Event | undefined> {
+    const queued = this.events.shift();
+    if (queued) return Promise.resolve(queued);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.wake = undefined;
+        resolve(undefined);
+      }, this.budgetMs);
+      this.wake = () => {
+        clearTimeout(timer);
+        this.wake = undefined;
+        resolve(this.events.shift());
+      };
+    });
+  }
 
-  const unpark = async (handle: string, value?: unknown): Promise<unknown> => {
-    const site = parkTable.take(handle);
-    if (!site) throw new ProgramError("PARK_NOT_FOUND", `找不到挂起现场：${handle}`);
-    if (site.workspaceId !== input.workspaceId) {
-      throw new ProgramError("PARK_WORKSPACE_MISMATCH", "挂起现场不属于当前工作区。");
-    }
-    const result = await site.resume(value);
-    if (result.status === "parked") {
-      throw Object.assign(new Error("REPARK"), { repark: result });
-    }
-    if (result.status === "failed") {
-      throw new ProgramError(result.error?.code ?? "RESUME_FAILED", result.error?.message ?? "恢复失败");
-    }
-    if (result.status === "abandoned") {
-      throw new ProgramError("ABANDONED", "现场已放弃");
-    }
-    for (const path of result.written) {
-      if (!written.includes(path)) written.push(path);
-    }
-    return result.value;
-  };
+  private push(event: Event): void {
+    if (event.t === "end" && this.events.some((e) => e.t === "end")) return;
+    this.events.push(event);
+    this.wake?.();
+  }
 
-  const abandon = async (handle: string): Promise<void> => {
-    const site = parkTable.take(handle);
-    if (!site) throw new ProgramError("PARK_NOT_FOUND", `找不到挂起现场：${handle}`);
-    await site.abandon();
-  };
-
-  // 万象术风格：全部原语挂在 this 上（this.cat / this.call / this.unpark …）
-  const api = { ...apiSurface, unpark, abandon };
-
-  const settle = (result: RunProgramResult): RunProgramResult => {
-    if (result.status !== "parked") dispose();
-    finalize(result);
-    return result;
-  };
-
-  const execPromise = (async (): Promise<RunProgramResult> => {
-    try {
-      const value = await executeProgram(input.program, api);
-      assertJsonCompatible(value ?? null);
-      return settle({ status: "done", value: value ?? null, written: [...written] });
-    } catch (error) {
-      if ((error as { repark?: RunProgramResult }).repark) {
-        // 本 program 仅转发他人的再次挂起；本 hub 可释放
-        dispose();
-        const result = (error as { repark: RunProgramResult }).repark;
-        finalize(result);
-        return result;
-      }
-      if (isProgramError(error)) {
-        return settle({
-          status: error.code === "ABANDONED" ? "abandoned" : "failed",
-          error: { code: error.code, message: error.message },
-          written: [...written],
-        });
-      }
-      return settle({
-        status: "failed",
-        error: {
-          code: "PROGRAM_ERROR",
-          message: error instanceof Error ? error.message : String(error),
-        },
-        written: [...written],
-      });
-    }
-  })();
-
-  function emitPark(
-    kind: "where" | "park" | "confirm" | "yield",
-    payload: unknown,
-    waiter: { resolve: (value: unknown) => void; reject: (error: unknown) => void },
-  ): RunProgramResult {
-    const site = parkTable.create(
-      input.workspaceId,
+  private park(kind: ParkKind, payload: unknown, resumeId?: number): RunProgramResult {
+    const site = this.parkTable.create(
+      this.input.workspaceId,
       kind,
       payload,
       async (value) => {
-        deadlineMs = Date.now() + yieldBudgetMs;
-        ctx.deadlineMs = deadlineMs;
-        waiter.resolve(value);
-        while (true) {
-          if (parkedKind && parkWaiter) {
-            const reKind = parkedKind!;
-            const rePayload = parkedPayload;
-            const reWaiter = parkWaiter!;
-            parkedKind = undefined;
-            parkedPayload = undefined;
-            parkWaiter = undefined;
-            return emitPark(reKind, rePayload, reWaiter);
-          }
-          const settled = await raceSettled(outcomePromise, 20);
-          if (settled) return settled;
-        }
+        if (resumeId !== undefined && !this.dead) this.send({ t: "resume", id: resumeId, value });
+        return this.wait();
       },
-      async () => {
-        waiter.reject(new ProgramError("ABANDONED", "现场已放弃"));
-        dispose();
-        finalize({
-          status: "abandoned",
-          error: { code: "ABANDONED", message: "现场已放弃" },
-          written: [...written],
-        });
-      },
-      {
-        elapsedMs: Date.now() - startedAt,
-        progress: kind === "yield" ? { phase: "yield" } : undefined,
-      },
+      async () => this.kill(endWith("abandoned", "ABANDONED", "现场已放弃")),
+      { elapsedMs: Date.now() - this.startedAt, progress: kind === "yield" ? { phase: "yield" } : undefined },
     );
-    return { status: "parked", parked: toView(site), written: [...written] };
+    return { status: "parked", parked: toView(site), written: [...this.written] };
   }
 
-  while (true) {
-    if (parkedKind && parkWaiter) {
-      const kind = parkedKind;
-      const payload = parkedPayload;
-      const waiter = parkWaiter;
-      parkedKind = undefined;
-      parkedPayload = undefined;
-      parkWaiter = undefined;
+  private finish(end: ProgramEnd): RunProgramResult {
+    this.kill(end);
+    this.merge(end.written);
+    if (end.status === "repark") return { ...end.repark, written: union(this.written, end.repark.written) };
+    if (end.status === "done") return { status: "done", value: end.value, written: [...this.written] };
+    return { status: end.status, error: end.error, written: [...this.written] };
+  }
 
-      return emitPark(kind, payload, waiter);
+  private async onMessage(msg: WorkerToMain): Promise<void> {
+    if (msg.t === "park" || msg.t === "end") {
+      if (msg.t === "end") this.kill(msg.end);
+      else this.push(msg);
+      return;
     }
-
-    const settled = await raceSettled(execPromise, 20);
-    if (settled) return settled;
+    this.send({ t: "reply", id: msg.id, ...(await this.broker(msg)) });
   }
 
-}
-
-async function raceSettled<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
-  let done = false;
-  let value: T | undefined;
-  void promise.then(
-    (result) => {
-      done = true;
-      value = result;
-    },
-    () => {
-      done = true;
-    },
-  );
-  await new Promise((resolve) => setTimeout(resolve, ms));
-  return done ? value : undefined;
-}
-
-async function executeProgram(
-  source: string,
-  api: Record<string, unknown>,
-): Promise<unknown> {
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
-    ...args: string[]
-  ) => (...args: unknown[]) => Promise<unknown>;
-  let fn: (...args: unknown[]) => Promise<unknown>;
-  try {
-    // 程序体挂在 this 上：this.cat / this.call / this.unpark …
-    fn = new AsyncFunction(`"use strict";\n${source}`);
-  } catch (error) {
-    throw new ProgramError(
-      "PROGRAM_SYNTAX",
-      `程序语法错误：${error instanceof Error ? error.message : String(error)}`,
-    );
+  /** this.unpark / this.abandon from inside a program resume another program's park. */
+  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" }>): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
+    if (msg.t === "call") {
+      if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
+      try {
+        return { call: await this.hub.call(msg.spec, msg.opts) };
+      } catch (error) {
+        return {
+          error: isProgramError(error)
+            ? { code: error.code, message: error.message }
+            : { code: "CALL_FAILED", message: error instanceof Error ? error.message : String(error) },
+        };
+      }
+    }
+    const site = this.parkTable.take(msg.handle);
+    if (!site) return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}` } };
+    if (site.workspaceId !== this.input.workspaceId) {
+      return { error: { code: "PARK_WORKSPACE_MISMATCH", message: "挂起现场不属于当前工作区。" } };
+    }
+    if (msg.t === "abandon") {
+      await site.abandon();
+      return {};
+    }
+    const result = await site.resume(msg.value);
+    if (result.status === "parked") return { repark: result };
+    if (result.status === "done") return { value: result.value, written: result.written };
+    return { error: result.error ?? { code: "ABANDONED", message: "现场已放弃" } };
   }
-  return fn.call(api);
+
+  private send(msg: MainToWorker): void {
+    if (!this.dead) this.worker.postMessage(msg);
+  }
+
+  private merge(paths: string[]): void {
+    this.written = union(this.written, paths);
+  }
+}
+
+function union(a: string[], b: string[]): string[] {
+  return [...new Set([...a, ...b])];
+}
+
+function endWith(status: "failed" | "abandoned", code: string, message: string): ProgramEnd {
+  return { status, error: { code, message }, written: [] };
 }

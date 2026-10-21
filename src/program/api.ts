@@ -8,6 +8,7 @@ import { readFile, readdir, stat as fsStat } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { ProgramError } from "./errors.js";
 import {
+  analyzeCommandDanger,
   analyzePathDanger,
   assertInsideRoots,
   assertNotAuthFile,
@@ -16,7 +17,7 @@ import {
   type DangerHit,
 } from "./guard.js";
 import { nearestLine, whereAll, whereCandidates } from "./where.js";
-import { CallHub, type CallResult, type CallSpec } from "./call.js";
+import type { CallOpts, CallResult, CallSpec } from "./call.js";
 
 export interface ApiContext {
   workspaceId: string;
@@ -25,10 +26,16 @@ export interface ApiContext {
   configDir: string;
   stateDir: string;
   written: string[];
-  requestPark: (kind: "where" | "park" | "confirm" | "yield", payload: unknown) => Promise<unknown>;
-  deadlineMs: number;
-  checkYield: () => Promise<void>;
+  /** Pause the program until a later this.unpark(handle, value) (worker-side park). */
+  requestPark: (kind: "where" | "park" | "confirm", payload: unknown) => Promise<unknown>;
+  /** Runs a vetted call on the main thread (which owns, reaps and kills process groups). */
+  runCall: (spec: CallSpec, opts: CallOpts) => Promise<CallResult>;
 }
+
+/** cat refuses files above this size; read slices with this.call("head -c …") or this.rg instead. */
+export const CAT_MAX_BYTES = 8 * 1024 * 1024;
+/** rg output above this size is refused rather than silently cut mid-record. */
+export const RG_MAX_BYTES = 8 * 1024 * 1024;
 
 export function createProgramApi(ctx: ApiContext) {
   const resolvePath = (input: string): string =>
@@ -67,20 +74,28 @@ export function createProgramApi(ctx: ApiContext) {
     if (rootHit) await requireDanger(rootHit, forceDangerous);
   };
 
-  const hub = new CallHub({
-    get deadlineMs() {
-      return ctx.deadlineMs;
-    },
-    checkYield: () => ctx.checkYield(),
-    requestPark: (kind, payload) => ctx.requestPark(kind, payload),
-    requireDanger,
-    resolveCwd: (cwd) => resolvePath(cwd ?? "."),
-  });
+  /** Danger check and cwd confinement happen here (they may park); execution happens on main. */
+  const runCall = async (spec: CallSpec, opts: CallOpts = {}): Promise<CallResult> => {
+    const [command, dangerous] =
+      typeof spec === "string" ? [spec, opts.dangerous] : "spawn" in spec ? [spec.spawn, spec.dangerous] : [];
+    const hit = command === undefined ? undefined : analyzeCommandDanger(command);
+    if (hit) await requireDanger(hit, dangerous === true);
+    const cwdOf = (cwd?: string) => resolvePath(cwd ?? ".");
+    if (typeof spec === "string") return ctx.runCall(spec, { ...opts, cwd: cwdOf(opts.cwd) });
+    if ("spawn" in spec) return ctx.runCall({ ...spec, cwd: cwdOf(spec.cwd) }, opts);
+    return ctx.runCall(spec, opts);
+  };
 
   async function cat(path: string): Promise<string> {
-    await ctx.checkYield();
     const absolute = resolvePath(path);
     try {
+      const size = (await fsStat(absolute)).size;
+      if (size > CAT_MAX_BYTES) {
+        throw new ProgramError(
+          "FILE_TOO_LARGE",
+          `文件过大（${size} 字节 > ${CAT_MAX_BYTES}）：${path}。请用 this.rg 搜索，或 this.call("head -c N 文件") / sed -n 切片读取。`,
+        );
+      }
       const buf = await readFile(absolute);
       if (buf.includes(0)) throw new ProgramError("INVALID_UTF8", `文件含 NUL：${path}`);
       return buf.toString("utf8");
@@ -94,7 +109,6 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function stat(path: string) {
-    await ctx.checkYield();
     const absolute = resolve(ctx.root, path);
     try {
       assertInsideRoots(absolute, ctx.allowedRoots);
@@ -110,14 +124,12 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function ls(path: string): Promise<string[]> {
-    await ctx.checkYield();
     const absolute = resolvePath(path);
     const entries = await readdir(absolute, { withFileTypes: true });
     return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name));
   }
 
   async function rg(argv: string[]) {
-    await ctx.checkYield();
     if (!Array.isArray(argv) || argv.some((a) => typeof a !== "string")) {
       throw new ProgramError("RG_FAILED", "rg(argv) 需要字符串数组。");
     }
@@ -132,7 +144,13 @@ export function createProgramApi(ctx: ApiContext) {
     );
     const args = summary ? [...argv] : ["--json", ...argv];
     const cmd = ["rg", ...args].map(shellQuote).join(" ");
-    const result = await hub.call(cmd);
+    const result = await runCall(cmd, { maxOutputBytes: RG_MAX_BYTES });
+    if (result.truncated) {
+      throw new ProgramError(
+        "RG_OUTPUT_TOO_LARGE",
+        `rg 输出超过 ${RG_MAX_BYTES} 字节（共 ${result.bytes.stdout}）。请收窄路径/模式，或加 --max-count / -l。`,
+      );
+    }
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       throw new ProgramError("RG_FAILED", result.stderr || `rg 退出码 ${result.exitCode}`);
     }
@@ -156,7 +174,6 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function where(content: string, needle: string, from = 0): Promise<[number, number]> {
-    await ctx.checkYield();
     if (typeof content !== "string" || typeof needle !== "string") {
       throw new ProgramError("INVALID_ARGUMENT", "where(content, needle) 需要字符串。");
     }
@@ -180,7 +197,6 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function write(path: string, content: string, opts?: { dangerous?: boolean }) {
-    await ctx.checkYield();
     if (typeof content !== "string") {
       throw new ProgramError("INVALID_ARGUMENT", "write 的 content 必须是字符串。");
     }
@@ -192,7 +208,6 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function mkdir(path: string) {
-    await ctx.checkYield();
     const absolute = resolvePath(path);
     await guardWritePath(absolute, false);
     try {
@@ -207,7 +222,6 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function mv(from: string, to: string, opts?: { dangerous?: boolean }) {
-    await ctx.checkYield();
     const src = resolvePath(from);
     const dst = resolvePath(to);
     await guardWritePath(src, opts?.dangerous === true);
@@ -219,7 +233,6 @@ export function createProgramApi(ctx: ApiContext) {
   }
 
   async function rmPath(path: string, opts?: { dangerous?: boolean; recursive?: boolean }) {
-    await ctx.checkYield();
     const absolute = resolvePath(path);
     await guardWritePath(absolute, opts?.dangerous === true);
     if (opts?.recursive) {
@@ -248,7 +261,7 @@ export function createProgramApi(ctx: ApiContext) {
     commandOrSpec: CallSpec,
     opts: { cwd?: string; env?: Record<string, string>; dangerous?: boolean; timeoutMs?: number } = {},
   ): Promise<CallResult> {
-    return hub.call(commandOrSpec, opts);
+    return runCall(commandOrSpec, opts);
   }
 
   async function park(payload: unknown): Promise<unknown> {
@@ -268,7 +281,6 @@ export function createProgramApi(ctx: ApiContext) {
     rm: rmPath,
     call,
     park,
-    dispose: () => hub.dispose(),
   };
 }
 

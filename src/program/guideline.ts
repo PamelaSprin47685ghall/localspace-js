@@ -15,7 +15,9 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 - 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.rg(argv)\`、\`this.where\`、\`this.whereAll\`
 - 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
-- 执行：\`this.call("命令")\`；亦可 spawn / send / signal / waitFor / read / join 长进程
+- 执行：\`this.call("命令"[, { timeoutMs }])\`；亦可 spawn / send / signal / waitFor / read / join 长进程
+  - 每次 call 独占一个进程组。前台命令返回时，其残留子进程（如 \`cmd &\`）一并终止；要常驻就用 spawn。
+  - spawn 的进程随程序结束、this.abandon、现场过期或请求取消而整组终止。
 - 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
 - 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段
 
@@ -41,7 +43,7 @@ git 没有专用工具。需要时 \`this.call("git status")\` 等。输出在 J
 
 ## 稀缺
 
-时间与注意力有价格。输出有界（头尾各 128KiB），截断会标明。已经花掉的时间是沉没成本。
+时间与注意力有价格。输出有界：每路只保留末尾 128KiB，\`truncatedBytes\` 标明丢弃字节数；\`this.cat\` 拒读超过 8MiB 的文件（FILE_TOO_LARGE），返回值上限 1MiB。已经花掉的时间是沉没成本。
 
 ## 事实与意图
 
@@ -64,4 +66,4 @@ export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）
 this.cat(path) this.stat(path) this.ls(path) this.rg(argv) this.where(text,needle) this.whereAll(text,needle)
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
 this.call(command|spec[,opts]) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
-call 支持 spawn/send/signal/waitFor/read/join；写入立即落盘；危险操作会 park，this.unpark(handle,{dangerous:true}) 继续；每 30 秒自动 yield park。`;
+call 支持 spawn/send/signal/waitFor/read/join 与 {timeoutMs}；每个 call 独占进程组，程序结束/放弃/过期时整组终止；写入立即落盘；危险操作会 park，this.unpark(handle,{dangerous:true}) 继续；每 30 秒自动 yield park（即使程序在死循环）。`;

@@ -1,29 +1,42 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createConnection } from "node:net";
 import { ProgramError } from "./errors.js";
-import { analyzeCommandDanger, type DangerHit } from "./guard.js";
 
-const STREAM_CAP = 128 * 1024;
+/** Per-stream capture cap: keep the last N bytes, count what was dropped. */
+export const STREAM_CAP = 128 * 1024;
+const KILL_GRACE_MS = 2000;
+const DRAIN_GRACE_MS = 200;
 
 export interface CallResult {
   exitCode: number | null;
   signal?: string;
   stdout: string;
   stderr: string;
+  /** true when any stream dropped bytes (only the tail is kept). */
   truncated: boolean;
   bytes: { stdout: number; stderr: number };
+  truncatedBytes: { stdout: number; stderr: number };
   durationMs: number;
   name?: string;
+  pid?: number;
 }
 
+/**
+ * Runs on the main thread: the process that spawns a child must also reap it, and a terminated
+ * worker cannot. Danger checks and cwd confinement are done by the caller (the program API).
+ */
 export interface CallContext {
-  deadlineMs: number;
-  checkYield: () => Promise<void>;
-  requestPark: (kind: "where" | "park" | "confirm" | "yield", payload: unknown) => Promise<unknown>;
-  requireDanger: (hit: DangerHit, already: boolean) => Promise<void>;
-  resolveCwd: (cwd?: string) => string;
+  /** Default cwd (the workspace root). */
+  root: string;
 }
 
+export type CallOpts = {
+  cwd?: string;
+  env?: Record<string, string>;
+  dangerous?: boolean;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+};
 type SpawnSpec = { spawn: string; name: string; cwd?: string; env?: Record<string, string>; dangerous?: boolean };
 type SendSpec = { send: { name: string; input: string } };
 type SignalSpec = { signal: NodeJS.Signals | string; name: string };
@@ -32,30 +45,80 @@ type ReadSpec = { read: { name: string; waitMs?: number } };
 type JoinSpec = { join: { name: string; timeoutMs?: number } };
 export type CallSpec = string | SpawnSpec | SendSpec | SignalSpec | WaitForSpec | ReadSpec | JoinSpec;
 
-interface ManagedChild {
-  name: string;
-  command: string;
-  child: ChildProcessWithoutNullStreams;
-  stdout: HeadTail;
-  stderr: HeadTail;
-  startedAt: number;
-  exited: boolean;
-  exitCode: number | null;
+/** One shell process in its own process group, with capped capture. */
+class Proc {
+  readonly stdout: TailBuffer;
+  readonly stderr: TailBuffer;
+  readonly startedAt = Date.now();
+  exitCode: number | null = null;
   signal?: string;
-  exitWaiters: Array<() => void>;
+  exited = false;
+  readonly exitPromise: Promise<void>;
+  private readonly closed: Promise<void>;
+
+  constructor(
+    readonly child: ChildProcess,
+    readonly name: string | undefined,
+    cap: number,
+  ) {
+    this.stdout = new TailBuffer(cap);
+    this.stderr = new TailBuffer(cap);
+    child.stdout?.on("data", (c: Buffer) => this.stdout.push(c));
+    child.stderr?.on("data", (c: Buffer) => this.stderr.push(c));
+    this.exitPromise = new Promise((resolve) => {
+      child.once("exit", (code, sig) => {
+        this.exited = true;
+        this.exitCode = code;
+        this.signal = sig ?? undefined;
+        resolve();
+      });
+      child.once("error", (error) => {
+        this.exited = true;
+        this.exitCode = null;
+        this.stderr.push(Buffer.from(`\n[spawn error] ${error.message}\n`));
+        resolve();
+      });
+    });
+    this.closed = new Promise((resolve) => child.once("close", () => resolve()));
+  }
+
+  get pgid(): number | undefined {
+    return this.child.pid;
+  }
+
+  /** Wait for the shell to exit, then briefly for pipes to drain (a leftover grandchild may hold them). */
+  async settle(): Promise<void> {
+    await this.exitPromise;
+    await Promise.race([this.closed, sleep(DRAIN_GRACE_MS)]);
+    this.child.stdout?.destroy();
+    this.child.stderr?.destroy();
+  }
+
+  result(): CallResult {
+    return {
+      exitCode: this.exitCode,
+      ...(this.signal ? { signal: this.signal } : {}),
+      stdout: this.stdout.toString(),
+      stderr: this.stderr.toString(),
+      truncated: this.stdout.dropped > 0 || this.stderr.dropped > 0,
+      bytes: { stdout: this.stdout.total, stderr: this.stderr.total },
+      truncatedBytes: { stdout: this.stdout.dropped, stderr: this.stderr.dropped },
+      durationMs: Date.now() - this.startedAt,
+      ...(this.name ? { name: this.name } : {}),
+      ...(this.pgid ? { pid: this.pgid } : {}),
+    };
+  }
 }
 
 export class CallHub {
-  private readonly children = new Map<string, ManagedChild>();
+  private readonly named = new Map<string, Proc>();
+  private readonly groups = new Set<number>();
 
   constructor(private readonly ctx: CallContext) {}
 
-  async call(spec: CallSpec, opts: { cwd?: string; env?: Record<string, string>; dangerous?: boolean; timeoutMs?: number } = {}): Promise<CallResult> {
-    await this.ctx.checkYield();
-    if (typeof spec === "string") {
-      return this.foreground(spec, opts);
-    }
-    if ("spawn" in spec) return this.spawn(spec);
+  async call(spec: CallSpec, opts: CallOpts = {}): Promise<CallResult> {
+    if (typeof spec === "string") return this.foreground(spec, opts);
+    if ("spawn" in spec) return this.spawnNamed(spec);
     if ("send" in spec) return this.send(spec);
     if ("signal" in spec) return this.signal(spec);
     if ("waitFor" in spec) return this.waitFor(spec);
@@ -64,189 +127,84 @@ export class CallHub {
     throw new ProgramError("CALL_UNSUPPORTED", "无法识别的 call 参数。");
   }
 
+  /** Kill every process group this hub started (SIGTERM, then SIGKILL). */
   dispose(): void {
-    for (const managed of this.children.values()) {
-      if (!managed.exited) {
-        try {
-          managed.child.kill("SIGTERM");
-        } catch {
-          /* ignore */
-        }
-        setTimeout(() => {
-          if (!managed.exited) {
-            try {
-              managed.child.kill("SIGKILL");
-            } catch {
-              /* ignore */
-            }
-          }
-        }, 2000).unref?.();
-      }
-    }
-    this.children.clear();
+    for (const pgid of this.groups) killGroup(pgid);
+    this.groups.clear();
+    this.named.clear();
   }
 
-  private async foreground(
-    command: string,
-    opts: { cwd?: string; env?: Record<string, string>; dangerous?: boolean; timeoutMs?: number },
-  ): Promise<CallResult> {
-    const hit = analyzeCommandDanger(command);
-    if (hit) await this.ctx.requireDanger(hit, opts.dangerous === true);
-    const cwd = this.ctx.resolveCwd(opts.cwd);
-    const started = Date.now();
+  private start(command: string, o: { cwd?: string; env?: Record<string, string>; stdin: boolean; name?: string; cap?: number }): Proc {
     const child = spawn("/bin/bash", ["-lc", command], {
-      cwd,
-      env: { ...process.env, ...envOf(opts.env) },
-      stdio: ["ignore", "pipe", "pipe"],
-    }) as unknown as ChildProcessWithoutNullStreams;
-    const stdout = new HeadTail(STREAM_CAP);
-    const stderr = new HeadTail(STREAM_CAP);
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-
-    let exited = false;
-    let exitCode: number | null = null;
-    let signal: string | undefined;
-    const done = new Promise<void>((resolve, reject) => {
-      child.on("error", (error) => reject(new ProgramError("CALL_FAILED", error.message)));
-      child.on("close", (code, sig) => {
-        exited = true;
-        exitCode = code;
-        signal = sig ?? undefined;
-        resolve();
-      });
+      cwd: o.cwd ?? this.ctx.root,
+      env: { ...process.env, ...(o.env ?? {}) },
+      stdio: [o.stdin ? "pipe" : "ignore", "pipe", "pipe"],
+      detached: true, // own process group: pgid === pid
     });
-
-    const hardDeadline = opts.timeoutMs != null ? Date.now() + opts.timeoutMs : Number.POSITIVE_INFINITY;
-
-    while (!exited) {
-      if (Date.now() >= hardDeadline) {
-        child.kill("SIGKILL");
-        await done.catch(() => undefined);
-        throw new ProgramError("CALL_TIMEOUT", `命令超时：${command.slice(0, 120)}`);
-      }
-      if (Date.now() >= this.ctx.deadlineMs) {
-        await this.ctx.requestPark("yield", {
-          message: "已达自动挂起时限。",
-          phase: "call",
-          command,
-          stdoutTail: stdout.toString().slice(-2000),
-          stderrTail: stderr.toString().slice(-2000),
-          exited: false,
-        });
-        // resume: continue waiting
-      }
-      await Promise.race([done, sleep(100)]);
-    }
-
-    return {
-      exitCode,
-      ...(signal ? { signal } : {}),
-      stdout: stdout.toString(),
-      stderr: stderr.toString(),
-      truncated: stdout.truncated || stderr.truncated,
-      bytes: { stdout: stdout.total, stderr: stderr.total },
-      durationMs: Date.now() - started,
-    };
+    const proc = new Proc(child, o.name, o.cap ?? STREAM_CAP);
+    if (child.pid) this.groups.add(child.pid);
+    return proc;
   }
 
-  private async spawn(spec: SpawnSpec): Promise<CallResult> {
+  private async foreground(command: string, opts: CallOpts): Promise<CallResult> {
+    const proc = this.start(command, { ...opts, stdin: false, cap: opts.maxOutputBytes });
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut =
+      opts.timeoutMs != null
+        ? new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), opts.timeoutMs)))
+        : new Promise<never>(() => {});
+    const outcome = await Promise.race([proc.settle().then(() => "done" as const), timedOut]);
+    if (timer) clearTimeout(timer);
+    // 防呆: a foreground call owns its whole process group. Leftovers die with it;
+    // use { spawn } for anything that must keep running.
+    this.reap(proc);
+    if (outcome === "timeout") {
+      await proc.settle();
+      throw new ProgramError("CALL_TIMEOUT", `命令超时（${opts.timeoutMs}ms），已终止其进程组：${command.slice(0, 120)}`);
+    }
+    return proc.result();
+  }
+
+  private async spawnNamed(spec: SpawnSpec): Promise<CallResult> {
     const name = spec.name?.trim();
     if (!name) throw new ProgramError("CALL_CHILD_UNKNOWN", "spawn 需要 name。");
-    if (this.children.has(name) && !this.children.get(name)!.exited) {
-      throw new ProgramError("CALL_CHILD_EXISTS", `后台进程已存在：${name}`);
-    }
-    const hit = analyzeCommandDanger(spec.spawn);
-    if (hit) await this.ctx.requireDanger(hit, spec.dangerous === true);
-    const cwd = this.ctx.resolveCwd(spec.cwd);
-    const started = Date.now();
-    const child = spawn("/bin/bash", ["-lc", spec.spawn], {
-      cwd,
-      env: { ...process.env, ...envOf(spec.env) },
-      stdio: ["pipe", "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams;
-    const managed: ManagedChild = {
-      name,
-      command: spec.spawn,
-      child,
-      stdout: new HeadTail(STREAM_CAP),
-      stderr: new HeadTail(STREAM_CAP),
-      startedAt: started,
-      exited: false,
-      exitCode: null,
-      exitWaiters: [],
-    };
-    child.stdout.on("data", (chunk: Buffer) => managed.stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => managed.stderr.push(chunk));
-    child.on("close", (code, sig) => {
-      managed.exited = true;
-      managed.exitCode = code;
-      managed.signal = sig ?? undefined;
-      for (const wake of managed.exitWaiters) wake();
-      managed.exitWaiters = [];
-    });
-    child.on("error", () => {
-      managed.exited = true;
-      managed.exitCode = 1;
-      for (const wake of managed.exitWaiters) wake();
-      managed.exitWaiters = [];
-    });
-    this.children.set(name, managed);
-    return {
-      exitCode: null,
-      stdout: "",
-      stderr: "",
-      truncated: false,
-      bytes: { stdout: 0, stderr: 0 },
-      durationMs: Date.now() - started,
-      name,
-    };
+    const existing = this.named.get(name);
+    if (existing && !existing.exited) throw new ProgramError("CALL_CHILD_EXISTS", `后台进程已存在：${name}`);
+    const proc = this.start(spec.spawn, { ...spec, stdin: true, name });
+    this.named.set(name, proc);
+    return proc.result();
   }
 
   private async send(spec: SendSpec): Promise<CallResult> {
-    const managed = this.requireChild(spec.send.name);
-    if (managed.exited) throw new ProgramError("CALL_CHILD_UNKNOWN", `进程已退出：${managed.name}`);
+    const proc = this.requireNamed(spec.send.name);
+    if (proc.exited) throw new ProgramError("CALL_CHILD_EXITED", `进程已退出：${proc.name}`);
     let input = spec.send.input ?? "";
     if (input.length > 0 && !input.endsWith("\n")) input += "\n";
-    managed.child.stdin.write(input);
-    return snapshot(managed);
+    proc.child.stdin?.write(input);
+    return proc.result();
   }
 
   private async signal(spec: SignalSpec): Promise<CallResult> {
-    const managed = this.requireChild(spec.name);
-    if (!managed.exited) {
-      const sig = (spec.signal || "SIGTERM") as NodeJS.Signals;
-      managed.child.kill(sig);
-      const deadline = Date.now() + 2000;
-      while (!managed.exited && Date.now() < deadline) await sleep(50);
-      if (!managed.exited) managed.child.kill("SIGKILL");
-    }
-    return snapshot(managed);
+    const proc = this.requireNamed(spec.name);
+    if (proc.pgid) signalGroup(proc.pgid, (spec.signal || "SIGTERM") as NodeJS.Signals);
+    await Promise.race([proc.exitPromise, sleep(KILL_GRACE_MS)]);
+    if (!proc.exited && proc.pgid) signalGroup(proc.pgid, "SIGKILL");
+    await Promise.race([proc.exitPromise, sleep(500)]);
+    return proc.result();
   }
 
   private async waitFor(spec: WaitForSpec): Promise<CallResult> {
-    const port = spec.waitFor.port;
-    const host = spec.waitFor.host ?? "127.0.0.1";
-    const timeoutMs = spec.waitFor.timeoutMs ?? 30_000;
+    const { port, host = "127.0.0.1", timeoutMs = 30_000 } = spec.waitFor;
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      await this.ctx.checkYield();
-      if (Date.now() >= this.ctx.deadlineMs) {
-        await this.ctx.requestPark("yield", {
-          message: "等待端口时达自动挂起时限。",
-          phase: "waitFor",
-          port,
-          elapsedMs: Date.now() - started,
-        });
-      }
-      const open = await probePort(host, port);
-      if (open) {
+      if (await probePort(host, port)) {
         return {
           exitCode: 0,
           stdout: `port ${port} ready`,
           stderr: "",
           truncated: false,
           bytes: { stdout: 0, stderr: 0 },
+          truncatedBytes: { stdout: 0, stderr: 0 },
           durationMs: Date.now() - started,
         };
       }
@@ -256,73 +214,50 @@ export class CallHub {
   }
 
   private async read(spec: ReadSpec): Promise<CallResult> {
-    const managed = this.requireChild(spec.read.name);
+    const proc = this.requireNamed(spec.read.name);
     const waitMs = spec.read.waitMs ?? 0;
-    if (waitMs > 0) {
-      const until = Date.now() + waitMs;
-      while (Date.now() < until) {
-        await this.ctx.checkYield();
-        if (Date.now() >= this.ctx.deadlineMs) {
-          await this.ctx.requestPark("yield", {
-            message: "读取后台输出时达自动挂起时限。",
-            phase: "read",
-            name: managed.name,
-          });
-        }
-        if (managed.exited) break;
-        await sleep(50);
-      }
-    }
-    return snapshot(managed);
+    if (waitMs > 0) await Promise.race([proc.exitPromise, sleep(waitMs)]);
+    return proc.result();
   }
 
   private async join(spec: JoinSpec): Promise<CallResult> {
-    const managed = this.requireChild(spec.join.name);
-    const timeoutMs = spec.join.timeoutMs;
-    const started = Date.now();
-    while (!managed.exited) {
-      await this.ctx.checkYield();
-      if (timeoutMs != null && Date.now() - started >= timeoutMs) {
-        throw new ProgramError("CALL_WAIT_TIMEOUT", `等待进程 ${managed.name} 退出超时。`);
-      }
-      if (Date.now() >= this.ctx.deadlineMs) {
-        await this.ctx.requestPark("yield", {
-          message: "join 等待时达自动挂起时限。",
-          phase: "join",
-          name: managed.name,
-        });
-      }
-      await new Promise<void>((resolve) => {
-        if (managed.exited) return resolve();
-        managed.exitWaiters.push(resolve);
-        setTimeout(resolve, 100);
-      });
-    }
-    return snapshot(managed);
+    const proc = this.requireNamed(spec.join.name);
+    const { timeoutMs } = spec.join;
+    const done = await Promise.race([
+      proc.settle().then(() => true),
+      ...(timeoutMs != null ? [sleep(timeoutMs).then(() => false)] : []),
+    ]);
+    if (!done) throw new ProgramError("CALL_WAIT_TIMEOUT", `等待进程 ${proc.name} 退出超时。`);
+    this.reap(proc);
+    return proc.result();
   }
 
-  private requireChild(name: string): ManagedChild {
-    const managed = this.children.get(name);
-    if (!managed) throw new ProgramError("CALL_CHILD_UNKNOWN", `未知后台进程：${name}`);
-    return managed;
+  private reap(proc: Proc): void {
+    if (!proc.pgid) return;
+    killGroup(proc.pgid);
+    this.groups.delete(proc.pgid);
+  }
+
+  private requireNamed(name: string): Proc {
+    const proc = this.named.get(name);
+    if (!proc) throw new ProgramError("CALL_CHILD_UNKNOWN", `未知后台进程：${name}`);
+    return proc;
   }
 }
 
-function snapshot(managed: ManagedChild): CallResult {
-  return {
-    exitCode: managed.exitCode,
-    ...(managed.signal ? { signal: managed.signal } : {}),
-    stdout: managed.stdout.toString(),
-    stderr: managed.stderr.toString(),
-    truncated: managed.stdout.truncated || managed.stderr.truncated,
-    bytes: { stdout: managed.stdout.total, stderr: managed.stderr.total },
-    durationMs: Date.now() - managed.startedAt,
-    name: managed.name,
-  };
+function signalGroup(pgid: number, sig: NodeJS.Signals): boolean {
+  try {
+    process.kill(-pgid, sig);
+    return true;
+  } catch {
+    return false; // ESRCH: group already gone
+  }
 }
 
-function envOf(env?: Record<string, string>): Record<string, string> {
-  return env ?? {};
+/** SIGTERM the group now, SIGKILL it after a grace period if anything is left. */
+export function killGroup(pgid: number): void {
+  if (!signalGroup(pgid, "SIGTERM")) return;
+  setTimeout(() => signalGroup(pgid, "SIGKILL"), KILL_GRACE_MS).unref();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -344,45 +279,38 @@ function probePort(host: string, port: number): Promise<boolean> {
   });
 }
 
-export class HeadTail {
-  private head: Buffer[] = [];
-  private tail: Buffer[] = [];
-  private headBytes = 0;
-  private tailBytes = 0;
+/** Ring buffer keeping only the last `cap` bytes. */
+export class TailBuffer {
+  private chunks: Buffer[] = [];
+  private size = 0;
   total = 0;
-  truncated = false;
   constructor(private readonly cap: number) {}
-  push(chunk: Buffer) {
+  get dropped(): number {
+    return this.total - this.size;
+  }
+  push(chunk: Buffer): void {
     this.total += chunk.length;
-    if (this.headBytes < this.cap) {
-      const take = Math.min(chunk.length, this.cap - this.headBytes);
-      this.head.push(chunk.subarray(0, take));
-      this.headBytes += take;
-      if (take < chunk.length) {
-        this.truncated = true;
-        this.pushTail(chunk.subarray(take));
-      }
+    if (chunk.length >= this.cap) {
+      this.chunks = [chunk.subarray(chunk.length - this.cap)];
+      this.size = this.cap;
       return;
     }
-    this.truncated = true;
-    this.pushTail(chunk);
-  }
-  private pushTail(chunk: Buffer) {
-    this.tail.push(chunk);
-    this.tailBytes += chunk.length;
-    while (this.tailBytes > this.cap && this.tail.length > 1) {
-      const dropped = this.tail.shift()!;
-      this.tailBytes -= dropped.length;
-    }
-    if (this.tailBytes > this.cap && this.tail.length === 1) {
-      const only = this.tail[0]!;
-      this.tail[0] = only.subarray(only.length - this.cap);
-      this.tailBytes = this.cap;
+    this.chunks.push(chunk);
+    this.size += chunk.length;
+    while (this.size > this.cap) {
+      const head = this.chunks[0]!;
+      const excess = this.size - this.cap;
+      if (head.length <= excess) {
+        this.chunks.shift();
+        this.size -= head.length;
+      } else {
+        this.chunks[0] = head.subarray(excess);
+        this.size -= excess;
+      }
     }
   }
-  toString() {
-    const head = Buffer.concat(this.head).toString("utf8");
-    if (!this.truncated) return head;
-    return `${head}\n/* …截断… */\n${Buffer.concat(this.tail).toString("utf8")}`;
+  toString(): string {
+    const text = Buffer.concat(this.chunks).toString("utf8");
+    return this.dropped > 0 ? `/* …前 ${this.dropped} 字节已截断，仅保留末尾 ${this.size} 字节… */\n${text}` : text;
   }
 }

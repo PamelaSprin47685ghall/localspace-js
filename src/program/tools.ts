@@ -147,7 +147,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ workspaceId, program }) => {
+    async ({ workspaceId, program }, extra) => {
       const startedAt = performance.now();
       try {
         const workspace = workspaces.getWorkspace(workspaceId);
@@ -159,6 +159,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           stateDir: config.stateDir,
           program,
           yieldBudgetMs: config.yieldBudgetMs,
+          signal: extra.signal,
         });
 
         const summary = formatJsResult(result);

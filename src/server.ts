@@ -3,7 +3,8 @@ import { createRequire } from "node:module";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import { hostHeaderValidation, localhostHostValidation } from "@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js";
+import express, { type Express } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -22,6 +23,20 @@ import { ToolActivityLogManager } from "./activity-log.js";
 import { McpRequestMetricsManager, type RequestConnectionOutcome } from "./request-metrics.js";
 import { registerJsSurface } from "./program/tools.js";
 import { globalParkTable } from "./program/park.js";
+import { liveProgramCount, shutdownPrograms } from "./program/runner.js";
+import { startEventLoopMonitor } from "./event-loop-monitor.js";
+
+/** JSON-RPC body limit. express.json()'s 100kb default rejected long js programs with 413. */
+const MCP_BODY_LIMIT = "8mb";
+
+/** Same host validation as the SDK's createMcpExpressApp, with our body limit. */
+function createMcpApp(host: string, allowedHosts?: string[]): Express {
+  const app = express();
+  app.use(express.json({ limit: MCP_BODY_LIMIT }));
+  if (allowedHosts) app.use(hostHeaderValidation(allowedHosts));
+  else if (["127.0.0.1", "localhost", "::1"].includes(host)) app.use(localhostHostValidation());
+  return app;
+}
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: unknown };
@@ -33,7 +48,7 @@ const LOCALSPACE_VERSION =
 type Transport = StreamableHTTPServerTransport;
 
 export interface RunningServer {
-  app: ReturnType<typeof createMcpExpressApp>;
+  app: Express;
   config: ServerConfig;
   close: () => Promise<void>;
 }
@@ -116,9 +131,11 @@ export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
-  const app = createMcpExpressApp({
-    host: config.host,
-    ...(allowedHosts ? { allowedHosts } : {}),
+  const app = createMcpApp(config.host, allowedHosts);
+  globalParkTable.ttlMs = config.parkTtlMs;
+  const loopMonitor = startEventLoopMonitor({
+    onLag: (lag) =>
+      logEvent(config.logging, "warn", "event_loop_lag", { ...lag, livePrograms: liveProgramCount() }),
   });
   const transports = config.mcpTransportMode === "stateful"
     ? new McpSessionRegistry<Transport>(config.mcpSessions, (event) => {
@@ -175,7 +192,14 @@ export function createServer(config = loadConfig()): RunningServer {
   }
 
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true, name: "localspace-js", tools: ["open_workspace", "js"] });
+    res.json({
+      ok: true,
+      name: "localspace-js",
+      tools: ["open_workspace", "js"],
+      eventLoopLag: loopMonitor.last(),
+      livePrograms: liveProgramCount(),
+      parked: globalParkTable.size,
+    });
   });
 
   app.all("/mcp", async (req, res) => {
@@ -231,7 +255,13 @@ export function createServer(config = loadConfig()): RunningServer {
           sessionIdGenerator: undefined,
           enableJsonResponse: true,
         });
+        statelessTransport.onerror = (error) => logTransportError(config, req, requestId, error);
         const statelessServer = createMcpServer(config, workspaces, auditLog, activityLog);
+        // Client gone before the reply: closing the server aborts in-flight handlers (extra.signal),
+        // which kills the program's worker and process groups.
+        res.on("close", () => {
+          if (!res.writableFinished) void statelessServer.close().catch(() => undefined);
+        });
         serverCreateMs = Math.round((performance.now() - serverCreateStartedAt) * 100) / 100;
         const connectStartedAt = performance.now();
         await statelessServer.connect(statelessTransport);
@@ -275,6 +305,7 @@ export function createServer(config = loadConfig()): RunningServer {
             if (transport) transports.add(newSessionId, transport);
           },
         });
+        transport.onerror = (error) => logTransportError(config, req, requestId, error);
         transport.onclose = () => {
           const closedSessionId = transport?.sessionId;
           if (closedSessionId) {
@@ -337,12 +368,28 @@ export function createServer(config = loadConfig()): RunningServer {
       closePromise ??= (async () => {
         await transports?.closeAll("server_shutdown");
         globalParkTable.clear();
+        shutdownPrograms();
+        loopMonitor.stop();
         oauthProvider.close();
         workspaceStore.close?.();
       })();
       return closePromise;
     },
   };
+}
+
+/** The SDK answers malformed/unsupported requests with 400 itself; record why. */
+function logTransportError(config: ServerConfig, req: Request, requestId: string | undefined, error: Error): void {
+  logEvent(config.logging, "warn", "mcp_transport_error", {
+    requestId,
+    error: error.message,
+    httpMethod: req.method,
+    rpcMethod: mcpRpcRequestInfo(req.body).rpcMethod,
+    protocolVersion: req.header("mcp-protocol-version"),
+    accept: req.header("accept"),
+    contentType: req.header("content-type"),
+    userAgent: req.header("user-agent"),
+  });
 }
 
 function logMcpSessionEvent(config: ServerConfig, event: McpSessionRegistryEvent): void {

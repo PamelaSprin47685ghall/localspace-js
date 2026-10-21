@@ -40,7 +40,9 @@ export interface ParkSiteView {
 
 export class ParkTable {
   private readonly sites = new Map<string, ParkSite>();
-  constructor(private readonly ttlMs = 30 * 60 * 1000) {}
+  private sweeper?: NodeJS.Timeout;
+  /** Unclaimed parks expire after ttlMs; expiry abandons them (kills worker + process groups). */
+  constructor(public ttlMs = 30 * 60 * 1000) {}
 
   create(
     workspaceId: string,
@@ -65,6 +67,7 @@ export class ParkTable {
       progress: options.progress,
     };
     this.sites.set(site.handle, site);
+    this.sweep();
     return site;
   }
 
@@ -92,6 +95,24 @@ export class ParkTable {
     return [...this.sites.values()]
       .filter((site) => !workspaceId || site.workspaceId === workspaceId)
       .map(toView);
+  }
+
+  /** Expiry must not depend on someone touching the table: sweep on a timer while sites exist. */
+  private sweep(): void {
+    if (this.sweeper) return;
+    const every = Math.max(50, Math.min(30_000, Math.floor(this.ttlMs / 4)));
+    this.sweeper = setInterval(() => {
+      this.prune();
+      if (this.sites.size === 0) {
+        clearInterval(this.sweeper);
+        this.sweeper = undefined;
+      }
+    }, every);
+    this.sweeper.unref();
+  }
+
+  get size(): number {
+    return this.sites.size;
   }
 
   clear(): void {
