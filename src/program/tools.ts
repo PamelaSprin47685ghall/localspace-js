@@ -124,11 +124,19 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         "全部原语均为 this 成员：this.cat/stat/ls/rg/where/whereAll/write/mkdir/mv/rm/call/park，" +
         "以及 this.unpark(handle,arg)/this.abandon(handle)。" +
         "this.call 支持前台命令与 spawn/send/signal/waitFor/read/join。" +
-        "写入立即落盘；危险操作与 where 歧义会 park；约每 30 秒自动 yield park。" +
+        "写入立即落盘；危险操作与 where 歧义会 park。" +
+        "自动 park 时限按 planB 计价：planB 的 UTF-8 字节数 ÷ 20 = 秒数，空 planB 立刻 park。" +
         "互不相干的任务可在同一轮并行调用多个 js。",
       inputSchema: {
         workspaceId: z.string().describe("open_workspace 返回的工作区标识。"),
         program: z.string().min(1).describe("平铺的异步 JavaScript 程序体，可直接 await 顶层。"),
+        planB: z
+          .string()
+          .describe(
+            "假如不运行这段程序，你打算怎样继续完成任务？写清楚。" +
+              "这是买时间的钱：每 20 字节换 1 秒，用完就自动 park。跑得越久越烦，每多等一秒都要多写 20 字节来证明值得。" +
+              "表达完整就停笔，别凑字。写完若发现这个办法已经够用，就直接采用它，不要再跑这段程序。",
+          ),
       },
       outputSchema: {
         status: z.enum(["done", "parked", "failed", "abandoned"]),
@@ -147,7 +155,8 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ workspaceId, program }, extra) => {
+    async ({ workspaceId, program, planB }, extra) => {
+      const budget = { bytes: Buffer.byteLength(planB, "utf8"), ms: Buffer.byteLength(planB, "utf8") * 50 };
       const startedAt = performance.now();
       try {
         const workspace = workspaces.getWorkspace(workspaceId);
@@ -158,7 +167,8 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           configDir,
           stateDir: config.stateDir,
           program,
-          yieldBudgetMs: config.yieldBudgetMs,
+          yieldBudgetMs: budget.ms,
+          planB,
           signal: extra.signal,
         });
 
@@ -179,6 +189,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           git: gitDirty(workspace.root),
           parked: globalParkTable.list(workspaceId),
           yieldPark: result.status === "parked" && result.parked?.kind === "yield",
+          budget,
           restart: takeRestartHint(),
           risk,
           motto: GUIDELINE_MOTTO,

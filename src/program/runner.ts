@@ -12,6 +12,8 @@ export interface RunProgramInput {
   stateDir: string;
   program: string;
   yieldBudgetMs?: number;
+  /** Echoed back in the yield park so the model rereads its own alternative. */
+  planB?: string;
   parkTable?: ParkTable;
   /** Aborted when the MCP request is cancelled or its connection drops: the run and its process groups die. */
   signal?: AbortSignal;
@@ -39,7 +41,7 @@ export function liveProgramCount(): number {
 
 /**
  * Run a program in its own worker thread. The main thread only brokers messages and keeps time:
- * after `yieldBudgetMs` the request returns a yield park no matter what the program is doing
+ * after `yieldBudgetMs` (bought with planB bytes) the request returns a yield park no matter what the program is doing
  * (busy loop, never-resolving promise, long call).
  */
 export async function runProgram(input: RunProgramInput): Promise<RunProgramResult> {
@@ -65,11 +67,12 @@ class ProgramRun {
   private readonly events: Event[] = [];
   private wake?: () => void;
   private dead = false;
+  private planB?: string;
 
   constructor(
     private readonly input: RunProgramInput,
     private readonly parkTable: ParkTable,
-    private readonly budgetMs: number,
+    private budgetMs: number,
   ) {
     const init: WorkerInit = {
       program: input.program,
@@ -92,13 +95,14 @@ class ProgramRun {
     this.worker.on("message", (msg: WorkerToMain) => void this.onMessage(msg));
     this.worker.on("error", (error: Error) => this.kill(endWith("failed", "WORKER_CRASHED", `程序线程崩溃：${error.message}`)));
     this.worker.on("exit", (code) => this.kill(endWith("failed", "WORKER_EXITED", `程序线程退出（code ${code}）。`)));
+    this.planB = input.planB;
     live.add(this);
   }
 
   /** Wait up to the budget for the next park/end; otherwise hand back a yield park. */
   async wait(): Promise<RunProgramResult> {
     const event = await this.next();
-    if (!event) return this.park("yield", { message: "已达自动挂起时限，程序仍在后台运行。", elapsedMs: Date.now() - this.startedAt });
+    if (!event) return this.park("yield", { message: "planB 买的时间用完了，程序仍在后台运行。先重读你的 planB：够用就 this.abandon 改走它；不够再 unpark 续跑（续跑按新 planB 重新计价）。", planB: this.planB, budgetMs: this.budgetMs, elapsedMs: Date.now() - this.startedAt });
     if (event.t === "park") {
       this.merge(event.written);
       return this.park(event.kind, event.payload, event.id);
@@ -143,7 +147,8 @@ class ProgramRun {
       this.input.workspaceId,
       kind,
       payload,
-      async (value) => {
+      async (value, budgetMs) => {
+        this.budgetMs = budgetMs;
         if (resumeId !== undefined && !this.dead) this.send({ t: "resume", id: resumeId, value });
         return this.wait();
       },
@@ -193,7 +198,7 @@ class ProgramRun {
       await site.abandon();
       return {};
     }
-    const result = await site.resume(msg.value);
+    const result = await site.resume(msg.value, this.budgetMs);
     if (result.status === "parked") return { repark: result };
     if (result.status === "done") return { value: result.value, written: result.written };
     return { error: result.error ?? { code: "ABANDONED", message: "现场已放弃" } };

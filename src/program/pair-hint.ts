@@ -10,6 +10,7 @@ export interface PairHintInput {
   parked: ParkSiteView[];
   processes?: { name: string; exited: boolean; exitCode: number | null }[];
   yieldPark?: boolean;
+  budget?: { bytes: number; ms: number };
   restart?: boolean;
   risk?: { op: string; target?: string; allowed: boolean };
   motto: string;
@@ -40,7 +41,7 @@ export function composePairHints(input: PairHintInput): string {
           : ""),
     );
   }
-  if (input.yieldPark) blocks.push("yield: budget=30000 · 用 unpark(handle) 续跑");
+  if (input.budget) blocks.push(`budget: planB ${input.budget.bytes}B → ${(input.budget.ms / 1000).toFixed(1)}s` + (input.yieldPark ? " · 已用完；先重读 planB，够用就 abandon，否则写新 planB 再 unpark" : ""));
   if (input.restart) blocks.push("restart: 进程内 park 现场已清空；以当前磁盘与 git 为准继续");
   if (input.risk) {
     blocks.push(

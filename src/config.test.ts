@@ -11,7 +11,6 @@ const baseEnv = {
 {
   const config = loadConfig(baseEnv as NodeJS.ProcessEnv);
   assert.equal(config.authMode, "none");
-  assert.equal(config.yieldBudgetMs, 30_000);
   assert.equal(config.port, 7676);
   assert.ok(config.configDir);
   console.log("config.test.ts: ok");

@@ -21,7 +21,7 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 - 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
 - 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段
 
-长任务约每 30 秒自动 park（kind=yield），用 \`this.unpark(handle)\` 续跑。
+时间要花钱买：每次调用 \`js\` 都必须写 \`planB\`——假如不跑这段程序，你会怎样继续完成任务。它的 UTF-8 字节数 ÷ 20 就是自动 park（kind=yield）前的秒数，空 planB 立刻 park。跑得越久越烦：先认真写 planB，表达完整就停；写完发现 planB 已经够用，就直接采用，别跑。到点 park 后先重读自己的 planB，够用就 \`this.abandon\`，否则写新的 planB、用 \`this.unpark(handle)\` 续跑——续跑按新 planB 重新计价。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
 
@@ -66,4 +66,4 @@ export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）
 this.cat(path) this.stat(path) this.ls(path) this.rg(argv) this.where(text,needle) this.whereAll(text,needle)
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
 this.call(command|spec[,opts]) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
-call 支持 spawn/send/signal/waitFor/read/join 与 {timeoutMs}；每个 call 独占进程组，程序结束/放弃/过期时整组终止；写入立即落盘；危险操作会 park，this.unpark(handle,{dangerous:true}) 继续；每 30 秒自动 yield park（即使程序在死循环）。`;
+call 支持 spawn/send/signal/waitFor/read/join 与 {timeoutMs}；每个 call 独占进程组，程序结束/放弃/过期时整组终止；写入立即落盘；危险操作会 park，this.unpark(handle,{dangerous:true}) 继续；自动 yield park 时限 = planB UTF-8 字节数 ÷ 20 秒（即使程序在死循环也准时）；unpark 续跑按新 planB 重新计价。`;
