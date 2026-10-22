@@ -45,7 +45,7 @@ export function liveProgramCount(): number {
  * (busy loop, never-resolving promise, long call).
  */
 export async function runProgram(input: RunProgramInput): Promise<RunProgramResult> {
-  const run = new ProgramRun(input, input.parkTable ?? globalParkTable, input.yieldBudgetMs ?? 30_000);
+  const run = new ProgramRun(input, input.parkTable ?? globalParkTable);
   const onAbort = () => run.kill(endWith("failed", "CANCELLED", "请求已取消，程序及其进程组已终止。"));
   if (input.signal?.aborted) onAbort();
   input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -72,7 +72,6 @@ class ProgramRun {
   constructor(
     private readonly input: RunProgramInput,
     private readonly parkTable: ParkTable,
-    private budgetMs: number,
   ) {
     const init: WorkerInit = {
       program: input.program,
@@ -124,12 +123,7 @@ class ProgramRun {
     const queued = this.events.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.wake = undefined;
-        resolve(undefined);
-      }, this.budgetMs);
       this.wake = () => {
-        clearTimeout(timer);
         this.wake = undefined;
         resolve(this.events.shift());
       };
@@ -176,12 +170,45 @@ class ProgramRun {
   }
 
   /** this.unpark / this.abandon from inside a program resume another program's park. */
-  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" }>): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
+  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" | "signal" | "send" }>): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
+    if (msg.t === "signal") {
+      try {
+        await this.hub.signal(msg.signal);
+        return {};
+      } catch (error) {
+        return { error: isProgramError(error) ? { code: error.code, message: error.message } : { code: "SIGNAL_FAILED", message: String(error) } };
+      }
+    }
+    if (msg.t === "send") {
+      try {
+        await this.hub.send(msg.input);
+        return {};
+      } catch (error) {
+        return { error: isProgramError(error) ? { code: error.code, message: error.message } : { code: "SEND_FAILED", message: String(error) } };
+      }
+    }
     if (msg.t === "call") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
+      const budgetMs = Buffer.byteLength(msg.planB, "utf8") * 50;
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<"yield">((resolve) => (timer = setTimeout(() => resolve("yield"), budgetMs)));
       try {
-        return { call: await this.hub.call(msg.spec, msg.opts) };
+        const outcome = await Promise.race([this.hub.call(msg.command, msg.opts), timedOut]);
+        clearTimeout(timer);
+        if (outcome === "yield") {
+          const delta = this.hub.takeDelta();
+          this.push({
+            t: "park",
+            id: msg.id,
+            kind: "yield",
+            payload: { message: "planB 买的时间用完了。", planB: msg.planB, budgetMs, delta },
+            written: [...this.written],
+          });
+          return new Promise(() => {});
+        }
+        return { call: outcome };
       } catch (error) {
+        clearTimeout(timer);
         return {
           error: isProgramError(error)
             ? { code: error.code, message: error.message }

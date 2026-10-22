@@ -1,4 +1,4 @@
-import type { CallOpts, CallResult, CallSpec } from "./call.js";
+import type { CallOpts, CallResult } from "./call.js";
 import type { ParkResumeResult } from "./park.js";
 
 /** Data a worker needs to build the program API (all structured-clonable). */
@@ -17,7 +17,9 @@ export type WorkerToMain =
   | { t: "park"; id: number; kind: "where" | "park" | "confirm"; payload: unknown; written: string[] }
   | { t: "unpark"; id: number; handle: string; value: unknown }
   | { t: "abandon"; id: number; handle: string }
-  | { t: "call"; id: number; spec: CallSpec; opts: CallOpts }
+  | { t: "call"; id: number; command: string; planB: string; opts: CallOpts }
+  | { t: "signal"; id: number; signal?: string }
+  | { t: "send"; id: number; input: string }
   | { t: "end"; end: ProgramEnd };
 
 export type MainToWorker =

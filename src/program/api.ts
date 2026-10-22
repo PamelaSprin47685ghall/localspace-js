@@ -17,7 +17,7 @@ import {
   type DangerHit,
 } from "./guard.js";
 import { nearestLine, whereAll, whereCandidates } from "./where.js";
-import type { CallOpts, CallResult, CallSpec } from "./call.js";
+import type { CallOpts, CallResult } from "./call.js";
 
 export interface ApiContext {
   workspaceId: string;
@@ -28,8 +28,9 @@ export interface ApiContext {
   written: string[];
   /** Pause the program until a later this.unpark(handle, value) (worker-side park). */
   requestPark: (kind: "where" | "park" | "confirm", payload: unknown) => Promise<unknown>;
-  /** Runs a vetted call on the main thread (which owns, reaps and kills process groups). */
-  runCall: (spec: CallSpec, opts: CallOpts) => Promise<CallResult>;
+  runCall: (command: string, planB: string, opts: CallOpts) => Promise<CallResult>;
+  signalParked: (signal?: string) => Promise<void>;
+  sendParked: (input: string) => Promise<void>;
 }
 
 /** cat refuses files above this size; read slices with this.call("head -c …") or this.rg instead. */
@@ -74,16 +75,16 @@ export function createProgramApi(ctx: ApiContext) {
     if (rootHit) await requireDanger(rootHit, forceDangerous);
   };
 
-  /** Danger check and cwd confinement happen here (they may park); execution happens on main. */
-  const runCall = async (spec: CallSpec, opts: CallOpts = {}): Promise<CallResult> => {
-    const [command, dangerous] =
-      typeof spec === "string" ? [spec, opts.dangerous] : "spawn" in spec ? [spec.spawn, spec.dangerous] : [];
-    const hit = command === undefined ? undefined : analyzeCommandDanger(command);
-    if (hit) await requireDanger(hit, dangerous === true);
-    const cwdOf = (cwd?: string) => resolvePath(cwd ?? ".");
-    if (typeof spec === "string") return ctx.runCall(spec, { ...opts, cwd: cwdOf(opts.cwd) });
-    if ("spawn" in spec) return ctx.runCall({ ...spec, cwd: cwdOf(spec.cwd) }, opts);
-    return ctx.runCall(spec, opts);
+  const runCall = async (command: string, planB: string, opts: CallOpts = {}): Promise<CallResult> => {
+    if (typeof command !== "string" || !command) {
+      throw new ProgramError("CALL_COMMAND_UNSUPPORTED", "this.call 需要一条命令字符串。");
+    }
+    if (typeof planB !== "string" || !planB) {
+      throw new ProgramError("CALL_COMMAND_UNSUPPORTED", "this.call 必填 planB（不跑该命令时的替代方案）。");
+    }
+    const hit = analyzeCommandDanger(command);
+    if (hit) await requireDanger(hit, false);
+    return ctx.runCall(command, planB, opts);
   };
 
   async function cat(path: string): Promise<string> {
@@ -144,7 +145,7 @@ export function createProgramApi(ctx: ApiContext) {
     );
     const args = summary ? [...argv] : ["--json", ...argv];
     const cmd = ["rg", ...args].map(shellQuote).join(" ");
-    const result = await runCall(cmd, { maxOutputBytes: RG_MAX_BYTES });
+    const result = await runCall(cmd, "rg", { maxOutputBytes: RG_MAX_BYTES });
     if (result.truncated) {
       throw new ProgramError(
         "RG_OUTPUT_TOO_LARGE",
@@ -257,11 +258,16 @@ export function createProgramApi(ctx: ApiContext) {
     noteWrite(absolute);
   }
 
-  async function call(
-    commandOrSpec: CallSpec,
-    opts: { cwd?: string; env?: Record<string, string>; dangerous?: boolean; timeoutMs?: number } = {},
-  ): Promise<CallResult> {
-    return runCall(commandOrSpec, opts);
+  async function call(command: string, planB: string): Promise<CallResult> {
+    return runCall(command, planB, {});
+  }
+
+  async function signal(signalName?: string): Promise<void> {
+    return ctx.signalParked(signalName);
+  }
+
+  async function send(input: string): Promise<void> {
+    return ctx.sendParked(input);
   }
 
   async function park(payload: unknown): Promise<unknown> {
@@ -280,6 +286,8 @@ export function createProgramApi(ctx: ApiContext) {
     mv,
     rm: rmPath,
     call,
+    signal,
+    send,
     park,
   };
 }
@@ -290,4 +298,4 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\''`)}'`;
 }
 
-export type { CallResult, CallSpec } from "./call.js";
+export type { CallResult } from "./call.js";

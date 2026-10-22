@@ -76,7 +76,7 @@ async function run(program: string) {
 
 {
   const result = await run(`
-    return await this.call("rm -rf totally-not-real-path-xyz");
+    return await this.call("rm -rf totally-not-real-path-xyz", "先不删");
   `);
   assert.equal(result.status, "parked");
   assert.equal(result.parked?.kind, "confirm");
@@ -111,6 +111,9 @@ async function run(program: string) {
 {
   const spans = whereAll("aa bb\ncc bb", "bb");
   assert.equal(spans.length, 2);
+  // 字面匹配：空白不折叠
+  assert.equal(whereAll("aa  bb", "aa bb").length, 0);
+  assert.equal(whereAll("aa  bb", "aa  bb").length, 1);
   assert.ok(nearestLine("one\ntwo\nthree", "too"));
   console.log("whereAll/nearest: ok");
 }
@@ -130,7 +133,7 @@ async function run(program: string) {
 }
 
 {
-  // yield park with tiny budget
+  // yield park via call planB
   const result = await runProgram({
     workspaceId: "ws_test",
     root,
@@ -138,10 +141,9 @@ async function run(program: string) {
     configDir,
     stateDir,
     program: `
-      await this.call("sleep 1");
+      await this.call("sleep 1", "x".repeat(3));
       return "done";
     `,
-    yieldBudgetMs: 150,
     parkTable: new ParkTable(60_000),
   });
   assert.equal(result.status, "parked");
@@ -150,39 +152,14 @@ async function run(program: string) {
 }
 
 {
-  // call spawn / send / read / signal / join
+  // foreground call with planB
   const result = await run(`
-    await this.call({ spawn: "bash -lc 'while true; do echo ping; sleep 0.2; done'", name: "echoer" });
-    const mid = await this.call({ read: { name: "echoer", waitMs: 400 } });
-    await this.call({ signal: "SIGTERM", name: "echoer" });
-    const end = await this.call({ join: { name: "echoer", timeoutMs: 3000 } });
-    return {
-      midOut: mid.stdout.includes("ping"),
-      exitCode: end.exitCode,
-      name: end.name,
-    };
+    const out = await this.call("echo hello", "不用跑");
+    return out.stdout.trim();
   `);
-  if (result.status !== "done") console.error("spawn suite", result);
   assert.equal(result.status, "done");
-  const v = result.value as { midOut: boolean; exitCode: number | null; name: string };
-  assert.equal(v.midOut, true);
-  assert.ok(v.exitCode === 0 || v.exitCode === 143 || v.exitCode === null || typeof v.exitCode === "number");
-  assert.equal(v.name, "echoer");
-  console.log("this.call spawn/read/signal/join: ok");
-}
-
-{
-  // waitFor port
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  const port = (server.address() as { port: number }).port;
-  const result = await run(`
-    return await this.call({ waitFor: { port: ${port}, timeoutMs: 2000 } });
-  `);
-  server.close();
-  assert.equal(result.status, "done");
-  assert.equal((result.value as { exitCode: number }).exitCode, 0);
-  console.log("this.call waitFor: ok");
+  assert.equal(result.value, "hello");
+  console.log("this.call foreground: ok");
 }
 
 {
