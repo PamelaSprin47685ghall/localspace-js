@@ -37,7 +37,7 @@ git 没有专用工具。需要时 \`this.call("git status")\` 等。输出在 J
 
 ## 防呆
 
-少数危险操作会自动 park（kind=confirm）。在新 program 中 \`this.unpark(handle, { dangerous: true })\` 强制继续。硬性拒绝（不可覆盖）：路径越出允许根、改写 auth.json。
+少数危险操作会自动 park（kind=confirm）。在新 program 中 \`this.unpark(handle, { dangerous: true })\` 强制继续。硬性拒绝（不可覆盖）：路径越出允许根、改写 auth.json。提权不设限：用户给了密码就直接用，sudo 走 \`sudo -S\`（密码经 stdin），su 没有终端时用 \`script -qc "su -c …" /dev/null\` 并由 spawn/send 喂密码。
 
 除此以外系统不替你拦。写下去就是真的。
 

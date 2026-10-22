@@ -8,7 +8,6 @@ export type DangerKind =
   | "disk_format"
   | "dd_device"
   | "fork_bomb"
-  | "sudo"
   | "root_destroy"
   | "localspace_state";
 
@@ -26,7 +25,6 @@ const GIT_CLEAN = /\bgit\s+clean\b/i;
 const DISK_FORMAT = /(^|[;&|\n])\s*(mkfs\b|diskpart\b|format(?:\.com)?(?=\s|$))/i;
 const DD_DEVICE = /\bdd\b[^\n;|&]*\bof=\s*(\/dev\/[^\s;|&]+)/i;
 const FORK_BOMB = /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\s*\}\s*;/;
-const SUDO = /(^|[;&|\n])\s*(sudo\b|su\s)/i;
 
 export function analyzeCommandDanger(command: string): DangerHit | undefined {
   const c = command.trim();
@@ -40,7 +38,6 @@ export function analyzeCommandDanger(command: string): DangerHit | undefined {
   if (GIT_CLEAN.test(c) && !/--dry-run|\s-n\b/.test(c) && /(--force|\s-f\b)/.test(c)) {
     return { kind: "git_destructive", message: "git clean 强制清理。", target: c.slice(0, 80) };
   }
-  if (SUDO.test(c)) return { kind: "sudo", message: "提权执行（sudo/su）。", target: c.slice(0, 80) };
   return undefined;
 }
 

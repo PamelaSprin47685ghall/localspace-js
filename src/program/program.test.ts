@@ -102,7 +102,7 @@ async function run(program: string) {
 }
 
 {
-  assert.ok(analyzeCommandDanger("sudo ls"));
+  assert.equal(analyzeCommandDanger("sudo ls"), undefined);
   assert.ok(analyzeCommandDanger("git reset --hard"));
   assert.equal(analyzeCommandDanger("echo hi"), undefined);
   console.log("danger rules: ok");

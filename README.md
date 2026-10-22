@@ -24,7 +24,7 @@
 - 每个 `this.call` 独占进程组；程序结束、`this.abandon`、现场过期（`LOCALSPACE_PARK_TTL_MS`，默认 30 分钟）、请求取消或服务关闭时整组 SIGTERM→SIGKILL
 - 输出每路仅保留末尾 128KiB（`truncatedBytes` 标明丢弃量）；`this.cat` 上限 8MiB；返回值上限 1MiB；MCP 请求体上限 8MB
 - 主线程事件循环延迟超过 500ms 时记录 `event_loop_lag` 警告，`/healthz` 附带最近窗口
-- 危险操作（递归删除、强推、sudo…）自动 `confirm` park；`this.unpark(handle, { dangerous: true })` 强制继续
+- 危险操作（递归删除、强推、格式化…）自动 `confirm` park；`this.unpark(handle, { dangerous: true })` 强制继续
 - 硬性拒绝：路径越出 `allowedRoots`、改写 `auth.json`
 - 工具结果在 `\u0000\uFEFF`（NUL+BOM）之后附带 Pair Hint（git 脏度、park 现场等）
 
