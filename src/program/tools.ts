@@ -28,7 +28,8 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
     {
       title: "打开工作区",
       description:
-        "打开允许根内的本地项目目录或托管 worktree，返回 workspaceId、总纲与 API 速查。同一文件夹不要重复打开，除非 workspaceId 失效或切换目录。",
+        "打开允许根内的本地项目目录或托管 worktree，返回 workspaceId、总纲与 API 速查。" +
+        "workspaceId 由目录决定且稳定：同一文件夹重复打开返回同一个 id。",
       inputSchema: z.object({
         path: z.string().describe("绝对路径，或 ~/… 形式的家目录路径。"),
         mode: z
@@ -120,13 +121,17 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
     {
       title: "JS 编程面",
       description:
-        "在工作区运行一段平铺的异步 JavaScript 程序。输入只有 workspaceId 与 program。" +
+        "在工作区运行一段平铺的异步 JavaScript 程序。输入为 program，workspaceId 可省略。" +
+        "省略时使用最近使用的工作区；也可直接传入项目根目录路径。不要为了拿新 id 重新 open_workspace。" +
         "全部原语均为 this 成员：this.cat/stat/ls/rg/where/whereAll/write/mkdir/mv/rm/call/park，" +
         "以及 this.signal(sig) 与 this.send(input)。" +
         "this.call(command, planB) 必填 planB；写入立即落盘；危险操作与 where 歧义会 park。" +
         "互不相干的任务可在同一轮并行调用多个 js。",
       inputSchema: z.object({
-        workspaceId: z.string().describe("open_workspace 返回的工作区标识。"),
+        workspaceId: z
+          .string()
+          .nullish()
+          .describe("open_workspace 返回的稳定标识，或项目根目录路径。省略则复用最近使用的工作区。"),
         program: z.string().min(1).describe("平铺的异步 JavaScript 程序体，可直接 await 顶层。"),
       }),
       outputSchema: z.object({
@@ -148,10 +153,12 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
     },
     async ({ workspaceId, program }, ctx) => {
       const startedAt = performance.now();
+      let resolvedId: string | undefined = workspaceId ?? undefined;
       try {
-        const workspace = workspaces.getWorkspace(workspaceId);
+        const workspace = await workspaces.resolveWorkspace(workspaceId ?? undefined);
+        resolvedId = workspace.id;
         const result = await runProgram({
-          workspaceId,
+          workspaceId: workspace.id,
           root: workspace.root,
           allowedRoots: config.allowedRoots,
           configDir,
@@ -171,11 +178,11 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
             : undefined;
 
         const hints = composePairHints({
-          workspaceId,
+          workspaceId: workspace.id,
           root: workspace.root,
           branch: gitBranch(workspace.root),
           git: gitDirty(workspace.root),
-          parked: globalParkTable.list(workspaceId),
+          parked: globalParkTable.list(workspace.id),
           yieldPark: result.status === "parked" && result.parked?.kind === "yield",
           restart: takeRestartHint(),
           risk,
@@ -184,7 +191,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
 
         auditLog.record({
           tool: "js",
-          workspaceId,
+          workspaceId: workspace.id,
           action: result.status,
           success: result.status === "done" || result.status === "parked",
           durationMs: Math.round(performance.now() - startedAt),
@@ -214,7 +221,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         const message = error instanceof Error ? error.message : String(error);
         auditLog.record({
           tool: "js",
-          workspaceId,
+          workspaceId: resolvedId,
           action: "error",
           success: false,
           durationMs: Math.round(performance.now() - startedAt),

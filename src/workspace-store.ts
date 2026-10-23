@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import {
   workspaceSessions,
@@ -31,6 +31,8 @@ export interface WorkspaceStore {
     managed?: boolean;
   }): WorkspaceSession;
   getSession(id: string): WorkspaceSession | undefined;
+  /** Most recently used sessions first. */
+  listRecentSessions(limit: number): WorkspaceSession[];
   touchSession(id: string): void;
   close?(): void;
 }
@@ -79,6 +81,19 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
         createdAt: session.createdAt,
         lastUsedAt: session.lastUsedAt,
       })
+      .onConflictDoUpdate({
+        target: workspaceSessions.id,
+        set: {
+          root: session.root,
+          status: session.status,
+          mode: session.mode,
+          sourceRoot: session.sourceRoot ?? null,
+          baseRef: session.baseRef ?? null,
+          baseSha: session.baseSha ?? null,
+          managed: String(session.managed),
+          lastUsedAt: session.lastUsedAt,
+        },
+      })
       .run();
 
     return session;
@@ -92,6 +107,17 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
       .get();
 
     return row ? rowToWorkspaceSession(row) : undefined;
+  }
+
+  listRecentSessions(limit: number): WorkspaceSession[] {
+    const rows = this.database.db
+      .select()
+      .from(workspaceSessions)
+      .orderBy(desc(workspaceSessions.lastUsedAt))
+      .limit(Math.max(1, Math.floor(limit)))
+      .all();
+
+    return rows.map(rowToWorkspaceSession);
   }
 
   touchSession(id: string): void {

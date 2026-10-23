@@ -68,6 +68,7 @@ class ProgramRun {
   private wake?: () => void;
   private dead = false;
   private planB?: string;
+  private budgetMs?: number;
 
   constructor(
     private readonly input: RunProgramInput,
@@ -95,6 +96,7 @@ class ProgramRun {
     this.worker.on("error", (error: Error) => this.kill(endWith("failed", "WORKER_CRASHED", `程序线程崩溃：${error.message}`)));
     this.worker.on("exit", (code) => this.kill(endWith("failed", "WORKER_EXITED", `程序线程退出（code ${code}）。`)));
     this.planB = input.planB;
+    this.budgetMs = input.yieldBudgetMs;
     live.add(this);
   }
 
@@ -123,7 +125,13 @@ class ProgramRun {
     const queued = this.events.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => {
+      const budgetMs = this.budgetMs;
+      const timer = budgetMs === undefined ? undefined : setTimeout(() => {
+        this.wake = undefined;
+        resolve(undefined);
+      }, budgetMs);
       this.wake = () => {
+        clearTimeout(timer);
         this.wake = undefined;
         resolve(this.events.shift());
       };

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import type { Stats } from "node:fs";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
 import { resolveGitExecutable } from "./process-platform.js";
-import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
+import { assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import {
   loadWorkspaceSkills,
   markSkillActivated,
@@ -73,6 +73,7 @@ type DirectoryOps = {
 
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
+  private lastUsedId?: string;
 
   constructor(
     private readonly config: ServerConfig,
@@ -94,6 +95,7 @@ export class WorkspaceRegistry {
     const workspace = this.workspaces.get(workspaceId);
     if (workspace) {
       this.store?.touchSession(workspaceId);
+      this.lastUsedId = workspace.id;
       return workspace;
     }
 
@@ -124,8 +126,64 @@ export class WorkspaceRegistry {
     };
     this.store?.touchSession(workspaceId);
     this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+    this.lastUsedId = restoredWorkspace.id;
 
     return restoredWorkspace;
+  }
+
+  /**
+   * Resolve the workspace a `js` call should run in.
+   *
+   * Clients lose opaque ids: a model may echo a corrupted id, or none at all.
+   * - an exact id always wins;
+   * - an absolute / `~` path opens (or reuses) that directory;
+   * - an empty reference reuses the most recently used workspace;
+   * - an unknown id fails with the current candidates and an explicit recovery hint.
+   */
+  async resolveWorkspace(reference?: string): Promise<Workspace> {
+    const ref = reference?.trim();
+    if (!ref) return this.latestWorkspace();
+
+    try {
+      return this.getWorkspace(ref);
+    } catch (error) {
+      if (!isPathReference(ref)) throw this.unknownWorkspaceError(ref, error);
+    }
+
+    const info = await stat(expandHomePath(ref)).catch(() => undefined);
+    if (!info?.isDirectory()) throw this.unknownWorkspaceError(ref);
+
+    const context = await this.openWorkspace({ path: ref });
+    return context.workspace;
+  }
+
+  /** Most recently used workspace, restored from disk when the process restarted. */
+  latestWorkspace(): Workspace {
+    if (this.lastUsedId) {
+      const workspace = this.workspaces.get(this.lastUsedId);
+      if (workspace) {
+        this.store?.touchSession(workspace.id);
+        return workspace;
+      }
+      try {
+        return this.getWorkspace(this.lastUsedId);
+      } catch {
+        // Stored root is no longer accessible; fall through to other sessions.
+      }
+    }
+
+    for (const session of this.store?.listRecentSessions(20) ?? []) {
+      try {
+        return this.getWorkspace(session.id);
+      } catch {
+        // Skip sessions whose root is not allowed any more.
+      }
+    }
+
+    const fallback = [...this.workspaces.values()].at(-1);
+    if (fallback) return fallback;
+
+    throw new Error("还没有打开的工作区。先调用 open_workspace 打开一个目录。");
   }
 
   resolvePath(workspace: Workspace, inputPath: string): string {
@@ -201,8 +259,26 @@ export class WorkspaceRegistry {
     sourceRoot?: string;
     worktree?: WorkspaceWorktree;
   }): Promise<WorkspaceContext> {
+    const id = workspaceIdFor(input.root, input.mode);
+    const existing = this.workspaces.get(id);
+    if (existing) {
+      this.store?.createSession({
+        id: existing.id,
+        root: existing.root,
+        mode: existing.mode,
+        sourceRoot: existing.sourceRoot,
+        baseRef: existing.worktree?.baseRef,
+        baseSha: existing.worktree?.baseSha,
+        managed: existing.worktree?.managed,
+      });
+      this.lastUsedId = existing.id;
+      const agentsFiles = await this.loadInitialAgentsFiles(existing.root);
+      const availableAgentsFiles = await this.findAvailableAgentsFiles(existing.root, agentsFiles);
+      return { workspace: existing, agentsFiles, availableAgentsFiles };
+    }
+
     const workspace: Workspace = {
-      id: `ws_${randomUUID()}`,
+      id,
       root: input.root,
       mode: input.mode,
       sourceRoot: input.sourceRoot,
@@ -221,10 +297,41 @@ export class WorkspaceRegistry {
       managed: workspace.worktree?.managed,
     });
     this.workspaces.set(workspace.id, workspace);
+    this.lastUsedId = workspace.id;
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
 
     return { workspace, agentsFiles, availableAgentsFiles };
+  }
+
+  private unknownWorkspaceError(reference: string, cause?: unknown): Error {
+    const candidates: Array<{ id: string; root: string }> = [];
+    const seen = new Set<string>();
+    const collect = (id: string, root: string) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      candidates.push({ id, root });
+    };
+
+    for (const session of this.store?.listRecentSessions(10) ?? []) collect(session.id, session.root);
+    for (const workspace of this.workspaces.values()) collect(workspace.id, workspace.root);
+
+    const lines = [`Unknown workspaceId: ${reference}。`];
+    if (candidates.length > 0) {
+      lines.push("当前可用的工作区：");
+      for (const candidate of candidates.slice(0, 5)) {
+        lines.push(`- ${candidate.id}  ${candidate.root}`);
+      }
+      lines.push(
+        `不要重新 open_workspace：省略 workspaceId 即可复用最近使用的 ${candidates[0].id}，或直接传入项目根目录。`,
+      );
+    } else {
+      lines.push("当前没有打开的工作区。先调用 open_workspace 打开一个目录。");
+    }
+
+    const error = new Error(lines.join("\n"), cause === undefined ? undefined : { cause });
+    error.name = "UnknownWorkspaceIdError";
+    return error;
   }
 
   private loadSkillsForWorkspace(root: string): Pick<Workspace, "skills" | "skillDiagnostics"> {
@@ -320,6 +427,28 @@ export async function ensureCheckoutWorkspaceRoot(
 
   await ops.mkdir(path, { recursive: true });
   return await ops.stat(path);
+}
+
+/**
+ * Stable per-directory workspace id. Reopening the same directory always yields
+ * the same handle, so a client can recover by re-running open_workspace instead
+ * of chasing a fresh opaque UUID every turn.
+ */
+export function workspaceIdFor(root: string, mode: WorkspaceMode): string {
+  const digest = createHash("sha256").update(`${mode}\0${root}`).digest("hex");
+  return `ws_${digest.slice(0, 12)}`;
+}
+
+function isPathReference(reference: string): boolean {
+  return (
+    reference === "~" ||
+    reference.startsWith("~/") ||
+    reference.startsWith("~\\") ||
+    reference.startsWith("/") ||
+    reference.startsWith("./") ||
+    reference.startsWith("../") ||
+    /^[A-Za-z]:[\\/]/.test(reference)
+  );
 }
 
 const CONTEXT_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);

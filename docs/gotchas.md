@@ -135,12 +135,12 @@ node dist/cli.js init --force
 
 ## Unknown `workspaceId`
 
-`workspaceId` values are session identifiers. If the server restarts and the
-client receives an unknown workspace error, call `open_workspace` again for that
-project.
-
-Workspace session metadata is persisted, but clients should still treat
-`open_workspace` as the way to begin a fresh working session.
+`workspaceId` is derived from the workspace root and stable across reopens and
+server restarts. If a client still receives an unknown-id error, the error text
+lists the currently available workspaces. Either retry with `workspaceId`
+omitted (the most recently used workspace is reused) or pass the project root
+path directly. Do not reopen the same folder to obtain a new id: the stable id
+does not change.
 
 ## Workspace Path Rejected
 

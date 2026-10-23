@@ -34,6 +34,25 @@ try {
   const { workspace, agentsFiles, availableAgentsFiles } = await registry.openWorkspace(root);
 
   assert.equal(workspace.mode, "checkout");
+  assert.match(workspace.id, /^ws_[0-9a-f]{12}$/);
+  // Reopening the same directory is idempotent: the handle is derived from the root.
+  const reopened = await registry.openWorkspace(root);
+  assert.equal(reopened.workspace.id, workspace.id);
+  assert.equal(reopened.workspace.root, workspace.root);
+  // Omitted reference and a directory path both resolve to the same handle.
+  assert.equal((await registry.resolveWorkspace()).id, workspace.id);
+  assert.equal((await registry.resolveWorkspace(root)).id, workspace.id);
+  await assert.rejects(
+    () => registry.resolveWorkspace("ws_000000000000"),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message.includes(workspace.id) &&
+      error.message.includes("省略 workspaceId"),
+  );
+  assert.throws(
+    () => new WorkspaceRegistry(config).latestWorkspace(),
+    /还没有打开的工作区/,
+  );
   assert.deepEqual(
     agentsFiles.map((file) => file.content),
     ["global instructions\n", "root instructions\n"],
@@ -158,6 +177,9 @@ try {
   const firstStore = new SqliteWorkspaceStore(stateDir);
   const persistentRegistry = new WorkspaceRegistry(config, firstStore);
   const persistentWorkspace = await persistentRegistry.openWorkspace(root);
+  // Reopening with the store attached upserts the existing session instead of failing on the primary key.
+  const persistentAgain = await persistentRegistry.openWorkspace(root);
+  assert.equal(persistentAgain.workspace.id, persistentWorkspace.workspace.id);
   const persistentWorktree = await persistentRegistry.openWorkspace({
     path: gitRoot,
     mode: "worktree",
@@ -176,6 +198,14 @@ try {
   assert.equal(restoredWorktree.root, persistentWorktree.workspace.root);
   assert.equal(restoredWorktree.worktree?.managed, true);
   secondStore.close();
+
+  {
+    // A fresh process restores the most recently used workspace from the store.
+    const thirdStore = new SqliteWorkspaceStore(stateDir);
+    const thirdRegistry = new WorkspaceRegistry(config, thirdStore);
+    assert.equal(thirdRegistry.latestWorkspace().id, persistentWorktree.workspace.id);
+    thirdStore.close();
+  }
 
   if (platform() !== "win32") {
     const aliasRoot = join(root, "alias-root");

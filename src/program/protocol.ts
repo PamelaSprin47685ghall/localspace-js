@@ -14,7 +14,7 @@ export type ProgramEnd =
   | { status: "repark"; repark: ParkResumeResult; written: string[] };
 
 export type WorkerToMain =
-  | { t: "park"; id: number; kind: "where" | "park" | "confirm"; payload: unknown; written: string[] }
+  | { t: "park"; id: number; kind: "yield" | "where" | "park" | "confirm"; payload: unknown; written: string[] }
   | { t: "unpark"; id: number; handle: string; value: unknown }
   | { t: "abandon"; id: number; handle: string }
   | { t: "call"; id: number; command: string; planB: string; opts: CallOpts }

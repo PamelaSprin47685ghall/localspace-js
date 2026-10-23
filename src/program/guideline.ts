@@ -11,7 +11,7 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 优先使用 \`js\`。需要打开或切换目录时先 \`open_workspace\`。不要寻找已退役的 read/edit/write/bash/exec_command。
 
-\`js\` 的输入只有 \`{ workspaceId, program }\`。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
+\`js\` 的输入是 \`{ workspaceId?, program }\`。\`workspaceId\` 由目录决定、稳定不变；省略即复用最近使用的工作区，也可直接传项目根目录路径。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
 
 - 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.rg(argv)\`、\`this.where\`（字面匹配）、\`this.whereAll\`（字面匹配）
 - 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
@@ -24,6 +24,8 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 时间挂在 \`this.call\` 上：命令必须写 \`planB\`。每 20 字节换 1 秒，用完该命令自动 yield park。到点 park 后先重读自己的 planB，够用就 abandon，不够再写新的 planB 继续。工具参数没有 planB，程序不会因空 planB 立刻停。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
+
+\`js\` 报 Unknown workspaceId 时，错误正文已经列出当前候选。不要为了换新 id 重新 \`open_workspace\`：省略 workspaceId 或改用目录路径重试即可。
 
 ## 机舱纪律
 

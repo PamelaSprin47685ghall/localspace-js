@@ -5,7 +5,9 @@
 把原先细碎、常拦截的 MCP 工具面，换成两个工具：
 
 1. **`open_workspace`** — 打开允许根内的本地目录，返回 `workspaceId` 与中文**总纲**
-2. **`js`** — 唯一的读 / 写 / 执行入口：输入只有 `{ workspaceId, program }`
+2. **`js`** — 唯一的读 / 写 / 执行入口：输入 `{ workspaceId?, program }`
+
+`workspaceId` 由目录决定、稳定不变：同一文件夹重复 `open_workspace` 返回同一个 id，服务重启后也能恢复。`workspaceId` 可以省略（复用最近使用的工作区），也可以直接传项目根目录路径；未知 id 的报错会列出当前候选，不需要反复重开工作区。
 
 ## `js` 程序 API
 

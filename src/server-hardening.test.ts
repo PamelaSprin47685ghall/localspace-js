@@ -82,7 +82,7 @@ function rpc(method: string, params: Record<string, unknown>, opts: { modern?: b
   const opened = await rpc("tools/call", { name: "open_workspace", arguments: { path: join(root, "proj") } }, { modern: true, name: "open_workspace" });
   assert.equal(opened.status, 200);
   const wid = ((await opened.json()) as { result: { structuredContent: { workspaceId: string } } }).result.structuredContent.workspaceId;
-  const called = await rpc("tools/call", { name: "js", arguments: { workspaceId: wid, program: "return 6 * 7".repeat(60) } }, { modern: true, name: "js" });
+  const called = await rpc("tools/call", { name: "js", arguments: { workspaceId: wid, program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
   assert.equal(called.status, 200);
   const res = ((await called.json()) as { result: { content: { text: string }[]; structuredContent: { value: number } } }).result;
   assert.equal(res.structuredContent.value, 42);
@@ -90,6 +90,21 @@ function rpc(method: string, params: Record<string, unknown>, opts: { modern?: b
   const t = res.content[0]!.text;
   const sep = t.indexOf("\u0000\uFEFF");
   assert.ok(sep > 0 && t.slice(0, sep).startsWith("status: done"), "body first");
+
+  // workspaceId is optional: the most recent workspace is reused.
+  const omitted = await rpc("tools/call", { name: "js", arguments: { program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
+  // Raw JSON-RPC response; shape is asserted by the test itself.
+  const omittedBody = (await omitted.json()) as { result: { structuredContent: { value: number } } };
+  const omittedResult = omittedBody.result;
+  assert.equal(omittedResult.structuredContent.value, 42);
+
+  // A lost/corrupted id fails with candidates and a recovery instruction, not a dead end.
+  const bogus = await rpc("tools/call", { name: "js", arguments: { workspaceId: "ws_000000000000", program: "return 1" } }, { modern: true, name: "js" });
+  const bogusBody = (await bogus.json()) as { result: { content: { text: string }[]; isError?: boolean } };
+  const bogusResult = bogusBody.result;
+  assert.equal(bogusResult.isError, true);
+  assert.match(bogusResult.content[0]!.text, /省略 workspaceId/);
+  assert.match(bogusResult.content[0]!.text, new RegExp(wid));
   console.log("2026-07-28 server/discover + tools/call: ok");
 }
 
@@ -116,7 +131,7 @@ assert.ok(workspaceId, text(opened));
 {
   const m = await client(true);
   assert.equal(m.getProtocolEra(), "modern");
-  const r = await m.callTool({ name: "js", arguments: { workspaceId, program: "return 1 + 1".repeat(60) } });
+  const r = await m.callTool({ name: "js", arguments: { workspaceId, program: `return 1 + 1; // ${"pad".repeat(200)}` } });
   assert.equal(structured(r).value, 2, text(r));
   await m.close();
   assert.equal(a.getProtocolEra(), "legacy");
@@ -147,9 +162,13 @@ for (const modern of [false, true]) {
   console.log(`${modern ? "2026-07-28" : "2025-era"} client disconnect kills program + group: ok`);
 }
 
-// while(true) in one tool call; healthz and another tool call stay fast.
+// A long-running call parks on its planB budget; healthz and another tool call stay fast.
 const busyStarted = Date.now();
-const busy = a.callTool({ name: "js", arguments: { workspaceId, program: "while (true) {}".repeat(30) } });
+const sleepCommand = 'node -e "process.stdin.resume()"';
+const busy = a.callTool({
+  name: "js",
+  arguments: { workspaceId, program: `await this.call(${JSON.stringify(sleepCommand)}, "planB");` },
+});
 await sleep(200);
 const hz = Date.now();
 const health = await (await fetch(`${base}/healthz`)).json();
@@ -157,7 +176,7 @@ assert.ok(Date.now() - hz < 500, "healthz blocked");
 assert.equal(health.livePrograms, 1);
 const b = await client(true);
 const quickStarted = Date.now();
-const quick = await b.callTool({ name: "js", arguments: { workspaceId, program: "return 6 * 7".repeat(100) } });
+const quick = await b.callTool({ name: "js", arguments: { workspaceId, program: `return 6 * 7; // ${"pad".repeat(300)}` } });
 assert.ok(Date.now() - quickStarted < 1500, `second call took ${Date.now() - quickStarted}ms`);
 assert.equal(structured(quick).value, 42);
 const parked = structured(await busy);
@@ -165,15 +184,15 @@ assert.equal(parked.status, "parked");
 assert.equal((parked.parked as { kind: string }).kind, "yield");
 assert.ok(Date.now() - busyStarted < 4000);
 const handle = (parked.parked as { handle: string }).handle;
-const gone = await b.callTool({ name: "js", arguments: { workspaceId, program: `await this.abandon(${JSON.stringify(handle)}); return "ok"`.repeat(100) } });
+const gone = await b.callTool({ name: "js", arguments: { workspaceId, program: `await this.abandon(${JSON.stringify(handle)}); return "ok"; // ${"pad".repeat(200)}` } });
 assert.equal(structured(gone).value, "ok", text(gone));
 await sleep(100);
 assert.equal(liveProgramCount(), 0);
-console.log("while(true) does not block HTTP/MCP: ok");
+console.log("long call parks without blocking HTTP/MCP: ok");
 
 // A program body over express's old 100kb default is accepted.
 const bigProgram = `const s = ${JSON.stringify("x".repeat(300_000))}; return s.length;`;
-const big = await b.callTool({ name: "js", arguments: { workspaceId, program: bigProgram.repeat(100) } });
+const big = await b.callTool({ name: "js", arguments: { workspaceId, program: bigProgram } });
 assert.equal(structured(big).value, 300_000, text(big));
 console.log("300KB request body accepted: ok");
 

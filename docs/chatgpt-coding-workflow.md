@@ -14,8 +14,10 @@ ChatGPT should call `open_workspace` once for a project folder:
 }
 ```
 
-The result includes a `workspaceId`. All later file, search, edit, show-changes,
-and shell calls should reuse that same `workspaceId`.
+The result includes a `workspaceId` derived from the workspace root. It is
+stable across reopens and server restarts. Later calls may reuse that id, omit
+it (the most recently used workspace is reused), or pass the project root path
+directly.
 
 After opening a workspace, call `project_map` when you need a fast overview of
 the repo layout before drilling into specific files with `read`, `grep`, `glob`,
@@ -40,10 +42,13 @@ entrypoints, a directory tree, exported symbols, and import/export relationships
 
 Do not reopen the same folder unless:
 
-- the `workspaceId` is rejected as unknown
 - the user switches to another folder
 - the user switches between checkout and worktree mode
 - the user explicitly asks to reopen
+
+An unknown-id error is self-healing: it lists the current workspaces and tells
+the model to omit `workspaceId` or pass the root path. Reopening is not the
+recovery path, because the id is stable.
 
 ## Checkout Mode
 
