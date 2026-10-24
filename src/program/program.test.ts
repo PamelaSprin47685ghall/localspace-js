@@ -119,6 +119,7 @@ async function run(program: string) {
 
 {
   const hints = composePairHints({
+    now: "2026-10-24T10:30:00.000Z",
     workspaceId: "ws",
     root: "/tmp/x",
     parked: [],
@@ -127,6 +128,8 @@ async function run(program: string) {
   });
   assert.ok(hints.startsWith(PAIR_HINT_SEPARATOR));
   assert.ok(hints.includes("口诀"));
+  assert.ok(hints.includes(PAIR_HINT_SEPARATOR + "now 2026-10-24T10:30:00.000Z"), hints);
+  assert.equal(new Date("2026-10-24T10:30:00.000Z").toISOString(), "2026-10-24T10:30:00.000Z");
   assert.equal(appendPairHints("body", hints), "body" + hints);
   console.log("pair-hint: ok");
 }

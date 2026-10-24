@@ -3,6 +3,8 @@ import type { ParkSiteView } from "./park.js";
 export const PAIR_HINT_SEPARATOR = "\u0000\uFEFF";
 
 export interface PairHintInput {
+  /** ISO UTC time of this reply; the model has no other clock. */
+  now?: string;
   workspaceId: string;
   root: string;
   branch?: string;
@@ -19,6 +21,7 @@ export interface PairHintInput {
 export function composePairHints(input: PairHintInput): string {
   const blocks: string[] = [];
   blocks.push(input.motto.trim());
+  if (input.now) blocks.push(`now ${input.now}`);
   const dirty = input.git?.dirty
     ? `dirty ${input.git.staged + input.git.unstaged + input.git.untracked} files`
     : "clean";

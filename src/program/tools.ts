@@ -40,6 +40,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         baseRef: z.string().optional().describe("worktree 的基础 Git ref，默认 HEAD。"),
       }),
       outputSchema: z.object({
+        servedAt: z.string().describe("本次回复的 UTC 时间（ISO 8601）。"),
         workspaceId: z.string(),
         root: z.string(),
         mode: z.enum(["checkout", "worktree"]),
@@ -58,7 +59,9 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           mode: mode ?? "checkout",
           baseRef,
         });
+        const servedAt = new Date().toISOString();
         const body = {
+          servedAt,
           workspaceId: context.workspace.id,
           root: context.workspace.root,
           mode: context.workspace.mode,
@@ -88,6 +91,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           durationMs: Math.round(performance.now() - startedAt),
         });
         const hints = composePairHints({
+          now: servedAt,
           workspaceId: body.workspaceId,
           root: body.root,
           ...(await gitHint(body.root)),
@@ -135,6 +139,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         program: z.string().min(1).describe("平铺的异步 JavaScript 程序体，可直接 await 顶层。"),
       }),
       outputSchema: z.object({
+        servedAt: z.string().describe("本次回复的 UTC 时间（ISO 8601）。"),
         status: z.enum(["done", "parked", "failed", "abandoned"]),
         value: z.unknown().optional(),
         error: z.object({ code: z.string(), message: z.string() }).optional(),
@@ -167,6 +172,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           signal: ctx.mcpReq.signal,
         });
 
+        const servedAt = new Date().toISOString();
         const summary = formatJsResult(result);
         const risk =
           result.status === "parked" && result.parked?.kind === "confirm"
@@ -178,6 +184,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
             : undefined;
 
         const hints = composePairHints({
+          now: servedAt,
           workspaceId: workspace.id,
           root: workspace.root,
           ...(await gitHint(workspace.root)),
@@ -201,6 +208,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           isError: result.status === "failed",
           content: [{ type: "text" as const, text: appendPairHints(summary, hints) }],
           structuredContent: {
+            servedAt,
             status: result.status,
             value: result.value,
             error: result.error,

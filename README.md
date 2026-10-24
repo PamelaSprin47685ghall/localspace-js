@@ -31,7 +31,7 @@
 - 主线程事件循环延迟超过 500ms 时记录 `event_loop_lag` 警告，`/healthz` 附带最近窗口
 - 危险操作（递归删除、强推、格式化…）自动 `confirm` park；`this.unpark(handle, { dangerous: true })` 强制继续
 - 硬性拒绝：路径越出 `allowedRoots`、改写 `auth.json`
-- 工具结果在 `\u0000\uFEFF`（NUL+BOM）之后附带 Pair Hint（git 脏度、park 现场等）
+- 工具结果在 `\u0000\uFEFF`（NUL+BOM）之后附带 Pair Hint（`now` ISO UTC 时间、git 脏度、park 现场等）；`structuredContent.servedAt` 是同一时间，模型据此知道“现在几点”
 
 ### `this.call`
 
