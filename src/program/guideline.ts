@@ -13,7 +13,9 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 \`js\` 的输入是 \`{ workspaceId?, program }\`。\`workspaceId\` 由目录决定、稳定不变；省略即复用最近使用的工作区，也可直接传项目根目录路径。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
 
-- 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.rg(argv)\`、\`this.where\`（字面匹配）、\`this.whereAll\`（字面匹配）
+- 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.search(query, opts?)\`（语义索引，repo 绑定当前工作区）、\`this.findRelated(file, line, opts?)\`、\`this.where\`（字面匹配）、\`this.whereAll\`（字面匹配）
+  - \`this.search\` 由内置的 Semble（经 \`uvx\` 启动）提供：传函数名/行为描述，返回 \`{ query, results: [{ file_path, start_line, end_line, score, content? }] }\`。\`opts\` 可为 \`{ topK, maxSnippetLines, content }\`；首次调用要下载依赖并建索引，可能超过一个等待窗口——到点照常 yield，\`this.unpark(handle)\` 继续等即可，不要重发查询。
+  - \`this.findRelated(file, line, opts?)\` 在同一次索引里找相似代码（找实现、调用方、同类测试），\`file\` 用搜索结果里的路径。
 - 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
 - 执行：\`this.call(command, planB)\`。\`planB\` 必填，是不跑该命令时的替代方案；它的 UTF-8 字节数 × 50ms 是这条命令的 yield 时限。缺 planB 以 CALL_COMMAND_UNSUPPORTED 失败。
   - \`this.signal(sig)\` 与 \`this.send(input)\` 作用在让这次程序 park 的那条 call 上。没有这样一条仍在跑的命令时是 CALL_CHILD_UNKNOWN。
@@ -65,7 +67,8 @@ ${GUIDELINE_MOTTO}
 `;
 
 export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）：
-this.cat(path) this.stat(path) this.ls(path) this.rg(argv) this.where(text,needle) this.whereAll(text,needle) [字面匹配]
+this.cat(path) this.stat(path) this.ls(path) this.where(text,needle) this.whereAll(text,needle) [字面匹配]
+this.search(query[,{topK,maxSnippetLines,content}]) this.findRelated(file,line[,opts]) [Semble 语义索引，repo=当前工作区；依赖 uvx]
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
 this.call(command,planB) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
 call 只收命令字符串，planB 必填；时限 = planB 字节数 × 50ms，到期 yield park 带 delta；每次 js 请求另有 20s 等待窗口，yield 后用 this.unpark(handle) 继续，不重跑命令；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;

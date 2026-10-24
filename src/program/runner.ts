@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { CallHub } from "./call.js";
 import { isProgramError } from "./errors.js";
+import { sembleRequest } from "./semble.js";
 import { globalParkTable, toView, type ParkKind, type ParkResumeResult, type ParkTable } from "./park.js";
 import type { MainToWorker, ProgramEnd, WorkerInit, WorkerToMain } from "./protocol.js";
 
@@ -191,7 +192,19 @@ class ProgramRun {
   }
 
   /** this.unpark / this.abandon from inside a program resume another program's park. */
-  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" | "signal" | "send" }>): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
+  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" | "semble" | "signal" | "send" }>): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
+    if (msg.t === "semble") {
+      if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
+      try {
+        return { value: await sembleRequest(this.input.root, msg.tool, msg.args) };
+      } catch (error) {
+        return {
+          error: isProgramError(error)
+            ? { code: error.code, message: error.message }
+            : { code: "SEMBLE_FAILED", message: error instanceof Error ? error.message : String(error) },
+        };
+      }
+    }
     if (msg.t === "signal") {
       try {
         await this.hub.signal(msg.signal);

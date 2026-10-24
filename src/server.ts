@@ -34,6 +34,7 @@ import { trafficLog } from "./traffic-log.js";
 import { registerJsSurface } from "./program/tools.js";
 import { globalParkTable } from "./program/park.js";
 import { liveProgramCount, shutdownPrograms } from "./program/runner.js";
+import { shutdownSembleClients } from "./program/semble.js";
 import { startEventLoopMonitor } from "./event-loop-monitor.js";
 
 /** JSON-RPC body limit. express.json()'s 100kb default rejected long js programs with 413. */
@@ -268,6 +269,7 @@ export function createServer(config = loadConfig()): RunningServer {
         await modern.close();
         globalParkTable.clear();
         shutdownPrograms();
+        shutdownSembleClients();
         loopMonitor.stop();
         oauthProvider.close();
         workspaceStore.close?.();

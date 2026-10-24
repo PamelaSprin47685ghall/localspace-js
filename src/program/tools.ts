@@ -123,7 +123,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       description:
         "在工作区运行一段平铺的异步 JavaScript 程序。输入为 program，workspaceId 可省略。" +
         "省略时使用最近使用的工作区；也可直接传入项目根目录路径。不要为了拿新 id 重新 open_workspace。" +
-        "全部原语均为 this 成员：this.cat/stat/ls/rg/where/whereAll/write/mkdir/mv/rm/call/park，" +
+        "全部原语均为 this 成员：this.cat/stat/ls/search/findRelated/where/whereAll/write/mkdir/mv/rm/call/park，" +
         "以及 this.signal(sig) 与 this.send(input)。" +
         "this.call(command, planB) 必填 planB；写入立即落盘；危险操作与 where 歧义会 park。" +
         "互不相干的任务可在同一轮并行调用多个 js。",

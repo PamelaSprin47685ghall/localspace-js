@@ -15,10 +15,11 @@
 
 | 成员 | 作用 |
 |---|---|
-| `this.cat` / `this.stat` / `this.ls` / `this.rg` | 读与搜索 |
+| `this.cat` / `this.stat` / `this.ls` | 读文件与目录 |
+| `this.search` / `this.findRelated` | 语义代码搜索（内置 [Semble](https://github.com/MinishLab/semble)，经 `uvx` 启动） |
 | `this.where` / `this.whereAll` | 空白折叠精确定位；零/多匹配会 park |
 | `this.write` / `this.mkdir` / `this.mv` / `this.rm` | 立即落盘（as-is） |
-| `this.call(command\|spec)` | 执行 shell；支持 spawn / send / signal / waitFor / read / join |
+| `this.call(command, planB)` | 执行 shell |
 | `this.park` / `this.unpark` / `this.abandon` | 挂起与恢复（在**新** program 里调用 unpark/abandon） |
 
 - 约每 **30 秒**自动 `yield` park，用 `this.unpark(handle)` 续跑
@@ -42,6 +43,17 @@ await this.call({ signal: "SIGTERM", name: "srv" });
 await this.call({ join: { name: "srv", timeoutMs: 5000 } });
 ```
 
+## 代码搜索依赖 `uvx`
+
+`this.search` / `this.findRelated` 直接调用 `uvx --from "semble[mcp]" semble`，仓库本身不捆绑它。使用前请安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)（自带 `uvx`）：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# 或：pip install uv
+```
+
+首次调用会下载 semble 并为本工作区建立索引（较慢）；之后的查询命中缓存。索引以**工作区根目录**为 `repo`，不接受程序传入的任意路径或远端 URL。`LOCALSPACE_SEMBLE_CMD` 可覆盖启动命令（JSON 数组或空白分隔），`LOCALSPACE_SEMBLE_TIMEOUT_MS`、`LOCALSPACE_SEMBLE_IDLE_MS` 调整单次调用上限与空闲回收时间。
+
 ## 示例
 
 ```js
@@ -49,8 +61,9 @@ await this.call({ join: { name: "srv", timeoutMs: 5000 } });
 const text = await this.cat("README.md");
 const [a, b] = await this.where(text, "## Install");
 await this.write("README.md", text.slice(0, a) + "## Setup" + text.slice(b));
-const out = await this.call("npm test");
-return { exit: out.exitCode };
+const hits = await this.search("解析 MCP initialize 请求的函数");
+const out = await this.call("npm test", "跳过测试，改为报告未验证风险");
+return { exit: out.exitCode, files: hits.results?.map((r) => r.file_path) };
 ```
 
 恢复挂起：

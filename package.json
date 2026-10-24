@@ -33,7 +33,7 @@
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js serve",
     "validate:package": "node scripts/validate-package-install.mjs",
-    "test": "tsx src/config.test.ts && tsx src/trust-proxy.test.ts && tsx src/program/program.test.ts && tsx src/program/hardening.test.ts && tsx src/server-hardening.test.ts && tsx src/roots.test.ts && tsx src/workspaces.test.ts && tsx src/concurrency.test.ts && tsx src/audit-log.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
+    "test": "tsx src/config.test.ts && tsx src/trust-proxy.test.ts && tsx src/program/program.test.ts && tsx src/program/hardening.test.ts && tsx src/program/semble.test.ts && tsx src/server-hardening.test.ts && tsx src/roots.test.ts && tsx src/workspaces.test.ts && tsx src/concurrency.test.ts && tsx src/audit-log.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [

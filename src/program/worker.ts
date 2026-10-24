@@ -50,6 +50,7 @@ const surface = createProgramApi({
   runCall: (command, planB, opts) => ask((id) => ({ t: "call", id, command, planB, opts })) as Promise<CallResult>,
   signalParked: (signal) => ask((id) => ({ t: "signal", id, signal })) as Promise<void>,
   sendParked: (input) => ask((id) => ({ t: "send", id, input })) as Promise<void>,
+  runSemble: (tool, args) => ask((id) => ({ t: "semble", id, tool, args })),
 });
 
 // 万象术风格：全部原语挂在 this 上（this.cat / this.call / this.unpark …）

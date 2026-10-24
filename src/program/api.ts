@@ -18,6 +18,7 @@ import {
 } from "./guard.js";
 import { nearestLine, whereAll, whereCandidates } from "./where.js";
 import type { CallOpts, CallResult } from "./call.js";
+import type { SembleContent, SembleTool } from "./semble.js";
 
 export interface ApiContext {
   workspaceId: string;
@@ -31,12 +32,49 @@ export interface ApiContext {
   runCall: (command: string, planB: string, opts: CallOpts) => Promise<CallResult>;
   signalParked: (signal?: string) => Promise<void>;
   sendParked: (input: string) => Promise<void>;
+  /** Built-in Semble search; `repo` is always bound to this workspace root by the main thread. */
+  runSemble: (tool: SembleTool, args: Record<string, unknown>) => Promise<unknown>;
 }
 
-/** cat refuses files above this size; read slices with this.call("head -c …") or this.rg instead. */
+export interface SembleOptions {
+  /** Results to return (1-50). */
+  topK?: number;
+  /** Lines of source per result; null = the whole chunk, 0 = location only. */
+  maxSnippetLines?: number | null;
+  content?: SembleContent;
+}
+
+/** cat refuses files above this size; use this.search / this.call("head -c …") instead. */
 export const CAT_MAX_BYTES = 8 * 1024 * 1024;
-/** rg output above this size is refused rather than silently cut mid-record. */
-export const RG_MAX_BYTES = 8 * 1024 * 1024;
+
+const SEMBLE_CONTENT: readonly SembleContent[] = ["code", "docs", "config", "all"];
+
+function sembleArgs(opts?: SembleOptions): Record<string, unknown> {
+  if (opts === undefined) return {};
+  if (!opts || typeof opts !== "object" || Array.isArray(opts)) {
+    throw new ProgramError("INVALID_ARGUMENT", "搜索选项必须是对象，如 { topK: 5 }。");
+  }
+  const args: Record<string, unknown> = {};
+  if (opts.topK !== undefined) {
+    if (!Number.isInteger(opts.topK) || opts.topK < 1 || opts.topK > 50) {
+      throw new ProgramError("INVALID_ARGUMENT", "topK 必须是 1-50 的整数。");
+    }
+    args.top_k = opts.topK;
+  }
+  if (opts.maxSnippetLines !== undefined) {
+    if (opts.maxSnippetLines !== null && (!Number.isInteger(opts.maxSnippetLines) || opts.maxSnippetLines < 0)) {
+      throw new ProgramError("INVALID_ARGUMENT", "maxSnippetLines 必须是 >=0 的整数或 null（整块）。");
+    }
+    args.max_snippet_lines = opts.maxSnippetLines;
+  }
+  if (opts.content !== undefined) {
+    if (!SEMBLE_CONTENT.includes(opts.content)) {
+      throw new ProgramError("INVALID_ARGUMENT", `content 只能是 ${SEMBLE_CONTENT.join("/")}。`);
+    }
+    args.content = opts.content;
+  }
+  return args;
+}
 
 export function createProgramApi(ctx: ApiContext) {
   const resolvePath = (input: string): string =>
@@ -94,7 +132,7 @@ export function createProgramApi(ctx: ApiContext) {
       if (size > CAT_MAX_BYTES) {
         throw new ProgramError(
           "FILE_TOO_LARGE",
-          `文件过大（${size} 字节 > ${CAT_MAX_BYTES}）：${path}。请用 this.rg 搜索，或 this.call("head -c N 文件") / sed -n 切片读取。`,
+          `文件过大（${size} 字节 > ${CAT_MAX_BYTES}）：${path}。请用 this.search 定位，或 this.call("head -c N 文件") / sed -n 切片读取。`,
         );
       }
       const buf = await readFile(absolute);
@@ -130,48 +168,22 @@ export function createProgramApi(ctx: ApiContext) {
     return entries.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name));
   }
 
-  async function rg(argv: string[]) {
-    if (!Array.isArray(argv) || argv.some((a) => typeof a !== "string")) {
-      throw new ProgramError("RG_FAILED", "rg(argv) 需要字符串数组。");
+  async function search(query: string, opts?: SembleOptions) {
+    if (typeof query !== "string" || !query.trim()) {
+      throw new ProgramError("INVALID_ARGUMENT", "this.search(query) 需要非空的自然语言或代码查询。");
     }
-    for (const arg of argv) {
-      if (arg.startsWith("-")) continue;
-      if (arg.includes("..") || arg.startsWith("/")) {
-        assertInsideRoots(resolve(ctx.root, arg), [ctx.root]);
-      }
+    return ctx.runSemble("search", { query, ...sembleArgs(opts) });
+  }
+
+  async function findRelated(path: string, line: number, opts?: SembleOptions) {
+    if (typeof path !== "string" || !path.trim()) {
+      throw new ProgramError("INVALID_ARGUMENT", "this.findRelated(path, line) 需要文件路径。");
     }
-    const summary = argv.some((a) =>
-      ["--files", "--files-with-matches", "-l", "--count"].includes(a),
-    );
-    const args = summary ? [...argv] : ["--json", ...argv];
-    const cmd = ["rg", ...args].map(shellQuote).join(" ");
-    const result = await runCall(cmd, "rg", { maxOutputBytes: RG_MAX_BYTES });
-    if (result.truncated) {
-      throw new ProgramError(
-        "RG_OUTPUT_TOO_LARGE",
-        `rg 输出超过 ${RG_MAX_BYTES} 字节（共 ${result.bytes.stdout}）。请收窄路径/模式，或加 --max-count / -l。`,
-      );
+    if (!Number.isInteger(line) || line < 1) {
+      throw new ProgramError("INVALID_ARGUMENT", "this.findRelated 的 line 必须是 1 起的整数。");
     }
-    if (result.exitCode !== 0 && result.exitCode !== 1) {
-      throw new ProgramError("RG_FAILED", result.stderr || `rg 退出码 ${result.exitCode}`);
-    }
-    if (summary) {
-      return {
-        exitCode: result.exitCode,
-        paths: result.stdout.split("\n").map((l: string) => l.trim()).filter(Boolean),
-      };
-    }
-    const messages = result.stdout
-      .split("\n")
-      .filter(Boolean)
-      .map((line: string) => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return { type: "raw", text: line };
-        }
-      });
-    return { exitCode: result.exitCode, messages };
+    const absolute = resolvePath(path);
+    return ctx.runSemble("find_related", { file_path: rel(absolute), line, ...sembleArgs(opts) });
   }
 
   async function where(content: string, needle: string, from = 0): Promise<[number, number]> {
@@ -278,7 +290,8 @@ export function createProgramApi(ctx: ApiContext) {
     cat,
     stat,
     ls,
-    rg,
+    search,
+    findRelated,
     where,
     whereAll,
     write,
@@ -290,12 +303,6 @@ export function createProgramApi(ctx: ApiContext) {
     send,
     park,
   };
-}
-
-function shellQuote(value: string): string {
-  if (value.length === 0) return "''";
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, `'\''`)}'`;
 }
 
 export type { CallResult } from "./call.js";

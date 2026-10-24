@@ -1,5 +1,6 @@
 import type { CallOpts, CallResult } from "./call.js";
 import type { ParkResumeResult } from "./park.js";
+import type { SembleTool } from "./semble.js";
 
 /** Data a worker needs to build the program API (all structured-clonable). */
 export interface WorkerInit {
@@ -18,6 +19,7 @@ export type WorkerToMain =
   | { t: "unpark"; id: number; handle: string; value: unknown }
   | { t: "abandon"; id: number; handle: string }
   | { t: "call"; id: number; command: string; planB: string; opts: CallOpts }
+  | { t: "semble"; id: number; tool: SembleTool; args: Record<string, unknown> }
   | { t: "signal"; id: number; signal?: string }
   | { t: "send"; id: number; input: string }
   | { t: "end"; end: ProgramEnd };
