@@ -1,5 +1,6 @@
 // Server-level: both protocol eras, client-disconnect abort, busy programs never block HTTP/MCP, large bodies, bearer 401.
 import assert from "node:assert/strict";
+import { installProcessGuards } from "./process-guards.js";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -281,5 +282,15 @@ await stop();
   assert.equal(logged?.headers.authorization, "[redacted]");
   assert.equal(logged?.headers["content-type"], "application/json");
   console.log("traffic log records headers with authorization redacted: ok");
+
+// A stray async throw is recorded and the process keeps serving instead of exiting.
+{
+  const seen: string[] = [];
+  installProcessGuards({ logging: loadConfig(env("none")).logging, onError: (kind) => seen.push(kind) });
+  void Promise.reject(new Error("boom"));
+  await sleep(50);
+  assert.deepEqual(seen, ["unhandled_rejection"]);
+  console.log("process guard keeps serving: ok");
+}
 }
 console.log("server-hardening.test.ts: all ok");

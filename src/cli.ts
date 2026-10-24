@@ -234,6 +234,8 @@ async function serve(): Promise<void> {
 
   const { createServer } = await import("./server.js");
   const config = loadConfig();
+  const { installProcessGuards } = await import("./process-guards.js");
+  installProcessGuards({ logging: config.logging });
   const { app, close } = createServer(config);
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(`localspace listening on http://${config.host}:${config.port}/mcp`);

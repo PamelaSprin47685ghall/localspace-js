@@ -333,6 +333,8 @@ async function isMainModule(): Promise<boolean> {
 
 if (await isMainModule()) {
   const { app, config, close } = createServer();
+  const { installProcessGuards } = await import("./process-guards.js");
+  installProcessGuards({ logging: config.logging });
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(`localspace-js listening on http://${config.host}:${config.port}/mcp`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);

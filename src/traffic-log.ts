@@ -52,6 +52,12 @@ export function trafficLog(stateDir: string, enabled = true): RequestHandler {
     // A start record without an end record is a request that is still (or was) hung.
     void append({ phase: "start", ts: new Date(t0).toISOString(), requestId, method: req.method, ...info }).catch(() => undefined);
     const release = trackInflight({ requestId, method: req.method, ...info });
+    // A request that is still open after 10s is what clients experience as "hung"; say so now
+    // instead of waiting for it to close.
+    const slow = setTimeout(() => {
+      void append({ phase: "slow", ts: new Date(t0).toISOString(), requestId, method: req.method, ...info, elapsedMs: Date.now() - t0 }).catch(() => undefined);
+    }, 10_000);
+    slow.unref();
     const chunks: Buffer[] = [];
     const grab = (c: unknown, enc?: unknown) => {
       if (c == null || typeof c === "function") return;
@@ -61,6 +67,7 @@ export function trafficLog(stateDir: string, enabled = true): RequestHandler {
     res.write = function (this: typeof res, c: unknown, ...rest: unknown[]) { grab(c, rest[0]); return (write as Function).call(this, c, ...rest); } as typeof res.write;
     res.end = function (this: typeof res, c?: unknown, ...rest: unknown[]) { grab(c, rest[0]); return (end as Function).call(this, c, ...rest); } as typeof res.end;
     res.once("close", () => {
+      clearTimeout(slow);
       release();
       void append({
         phase: "end",
