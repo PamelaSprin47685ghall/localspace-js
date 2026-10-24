@@ -170,7 +170,7 @@ console.log("hardening.test.ts: all ok");
 {
   const table = new ParkTable(60_000);
   const first = await run(
-    `return await this.call("echo EARLY; sleep 0.6; echo LATE", "x");`,
+    `return await this.call("echo EARLY; sleep 0.6; echo LATE", "yyyyyyyy");`,
     { budget: 5000, parkTable: table },
   );
   assert.equal(first.parked?.kind, "yield");
@@ -276,4 +276,21 @@ console.log("hardening.test.ts: all ok");
   });
   assert.equal(abandoned.status, "done", JSON.stringify(abandoned));
   console.log("stuck call still yields instead of hanging: ok");
+}
+
+// planB is user input: a number must fail cleanly instead of crashing the server process.
+{
+  const table = new ParkTable(60_000);
+  const first = await run(`return await this.call("sleep 20", "x");`, { budget: 60_000, parkTable: table });
+  assert.equal(first.parked?.kind, "yield");
+  const bad = await run(
+    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, undefined, 120000);`,
+    { budget: 60_000, parkTable: table },
+  );
+  assert.equal(bad.status, "failed", JSON.stringify(bad));
+  assert.equal(bad.error?.code, "INVALID_ARGUMENT");
+  const after = await run(`return "alive";`, { budget: 60_000, parkTable: table });
+  assert.equal(after.status, "done");
+  await run(`return await this.abandon(${JSON.stringify(first.parked!.handle)});`, { budget: 60_000, parkTable: table });
+  console.log("non-string planB fails cleanly: ok");
 }

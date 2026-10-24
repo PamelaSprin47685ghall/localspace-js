@@ -179,10 +179,10 @@ class ProgramRun {
     }
   }
 
-  private beginCall(planB: string | undefined): void {
+  private beginCall(waitMs: number, planB: string | undefined): void {
     if (this.callActive === 0) {
       this.callStartedAt = Date.now();
-      this.callWaitBudgetMs = planB === undefined ? CALL_WINDOW_MS : Buffer.byteLength(planB, "utf8") * 50;
+      this.callWaitBudgetMs = waitMs;
       this.planB = planB;
     }
     this.callActive += 1;
@@ -265,7 +265,19 @@ class ProgramRun {
       else this.push(msg);
       return;
     }
-    this.send({ t: "reply", id: msg.id, ...(await this.broker(msg)) });
+    // A malformed message from user code must never take down the server process.
+    let reply: Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">;
+    try {
+      reply = await this.broker(msg);
+    } catch (error) {
+      reply = {
+        error: {
+          code: isProgramError(error) ? error.code : "BROKER_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+    this.send({ t: "reply", id: msg.id, ...reply });
   }
 
   /** this.unpark / this.abandon from inside a program resume another program's park. */
@@ -300,8 +312,10 @@ class ProgramRun {
     }
     if (msg.t === "call") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
+      const wait = planBWaitMs(msg.planB);
+      if ("error" in wait) return wait;
       const call = this.hub.call(msg.command, msg.opts);
-      this.beginCall(msg.planB);
+      this.beginCall(wait.ms, typeof msg.planB === "string" ? msg.planB : undefined);
       try {
         // The request window (not this await) decides when the caller gets a park. The worker
         // stays suspended on this promise and receives the real CallResult whenever it arrives.
@@ -325,13 +339,14 @@ class ProgramRun {
       await site.abandon();
       return {};
     }
-    const waitBudgetMs = msg.planB === undefined ? CALL_WINDOW_MS : Buffer.byteLength(msg.planB, "utf8") * 50;
+    const wait = planBWaitMs(msg.planB);
+    if ("error" in wait) return wait;
     // Resuming waits on the other program: this request is billed by its own planB, not by the
     // 1s compute window, so `unpark(handle, undefined, planB)` can wait as long as it asked for.
-    this.beginCall(msg.planB);
+    this.beginCall(wait.ms, typeof msg.planB === "string" ? msg.planB : undefined);
     let result: ParkResumeResult;
     try {
-      result = await site.resume(msg.value, waitBudgetMs);
+      result = await site.resume(msg.value, wait.ms);
     } finally {
       this.endCall();
     }
@@ -347,6 +362,20 @@ class ProgramRun {
   private merge(paths: string[]): void {
     this.written = union(this.written, paths);
   }
+}
+
+/** planB is user input: bytes x 50ms, 1s when omitted, a clean error otherwise. */
+function planBWaitMs(planB: unknown): { ms: number } | { error: { code: string; message: string } } {
+  if (planB === undefined) return { ms: CALL_WINDOW_MS };
+  if (typeof planB !== "string" || !planB) {
+    return {
+      error: {
+        code: "INVALID_ARGUMENT",
+        message: `planB 必须是非空字符串（收到 ${typeof planB}）；省略时这条请求等 1 秒。`,
+      },
+    };
+  }
+  return { ms: Buffer.byteLength(planB, "utf8") * 50 };
 }
 
 function union(a: string[], b: string[]): string[] {
