@@ -240,3 +240,40 @@ console.log("hardening.test.ts: all ok");
   assert.match(v.stdout, /LATE/);
   console.log("planB-less call yields at 1s and keeps output: ok");
 }
+
+// unpark's planB buys the wait for an already-running call (no 1s poking).
+{
+  const table = new ParkTable(60_000);
+  const first = await run(`return await this.call("sleep 1.2; echo OK", "x");`, {
+    budget: 60_000,
+    parkTable: table,
+  });
+  assert.equal(first.parked?.kind, "yield");
+  const resumed = await run(
+    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, undefined, "p".repeat(40));`,
+    { budget: 60_000, parkTable: table },
+  );
+  assert.equal(resumed.status, "done", JSON.stringify(resumed));
+  assert.equal((resumed.value as { stdout: string }).stdout.trim(), "OK");
+  console.log("unpark planB waits for the live call: ok");
+}
+
+// The wait timer is never absent: a call that never exits still returns a yield park on unpark.
+{
+  const table = new ParkTable(60_000);
+  const first = await run(`return await this.call("sleep 30", "x");`, { budget: 60_000, parkTable: table });
+  assert.equal(first.parked?.kind, "yield");
+  const startedAt = Date.now();
+  const again = await run(
+    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, undefined, "p".repeat(20));`,
+    { budget: 60_000, parkTable: table },
+  );
+  assert.equal(again.parked?.kind, "yield", JSON.stringify(again));
+  assert.ok(Date.now() - startedAt < 5_000);
+  const abandoned = await run(`return await this.abandon(${JSON.stringify(again.parked!.handle)});`, {
+    budget: 60_000,
+    parkTable: table,
+  });
+  assert.equal(abandoned.status, "done", JSON.stringify(abandoned));
+  console.log("stuck call still yields instead of hanging: ok");
+}

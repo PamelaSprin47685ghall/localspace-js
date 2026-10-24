@@ -153,6 +153,17 @@ export class WorkspaceRegistry {
     const info = await stat(expandHomePath(ref)).catch(() => undefined);
     if (!info?.isDirectory()) throw this.unknownWorkspaceError(ref);
 
+    // A model may pass the root path instead of the id on every call; re-opening a known root
+    // costs a git scan per request, so answer from the registry first.
+    const target = resolve(expandHomePath(ref));
+    for (const workspace of this.workspaces.values()) {
+      if (workspace.root === target) {
+        this.lastUsedId = workspace.id;
+        this.store?.touchSession(workspace.id);
+        return workspace;
+      }
+    }
+
     const context = await this.openWorkspace({ path: ref });
     return context.workspace;
   }

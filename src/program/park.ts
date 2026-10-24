@@ -10,7 +10,7 @@ export interface ParkSite {
   createdAt: number;
   expiresAt: number;
   elapsedMs: number;
-  /** budgetMs: the resuming request's own budget; the resumed program is billed by the new planB. */
+  /** budgetMs: how long the resuming request is willing to wait on a call (its own planB, else 1s). */
   resume: (value: unknown, budgetMs?: number) => Promise<ParkResumeResult>;
   abandon: () => Promise<void>;
   progress?: {

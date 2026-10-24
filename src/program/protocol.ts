@@ -16,7 +16,7 @@ export type ProgramEnd =
 
 export type WorkerToMain =
   | { t: "park"; id: number; kind: "yield" | "where" | "park" | "confirm"; payload: unknown; written: string[] }
-  | { t: "unpark"; id: number; handle: string; value: unknown }
+  | { t: "unpark"; id: number; handle: string; value: unknown; planB?: string }
   | { t: "abandon"; id: number; handle: string }
   | { t: "call"; id: number; command: string; planB?: string; opts: CallOpts }
   | { t: "semble"; id: number; tool: SembleTool; args: Record<string, unknown> }

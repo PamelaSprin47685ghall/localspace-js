@@ -21,9 +21,9 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
   - \`this.signal(sig)\` 与 \`this.send(input)\` 作用在让这次程序 park 的那条 call 上。没有这样一条仍在跑的命令时是 CALL_CHILD_UNKNOWN。
   - 自动 park 的载荷带 \`delta: { stdout, stderr }\`：自上次 park 以来的新输出；命令最终结果仍在 \`CallResult\` 里，不会因为 yield 丢失。
 - 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
-- 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段。yield 现场的 \`arg\` 不注入命令结果；where/confirm/park 现场才用 \`arg\` 续跑。
+- 恢复：\`this.unpark(handle, arg?, planB?)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段。yield 现场的 \`arg\` 不注入命令结果；where/confirm/park 现场才用 \`arg\` 续跑。\`unpark\` 的 \`planB\` 与 \`this.call\` 同义：**这次请求愿意等多久**（字节数 × 50ms，省略 1 秒）。等已经跑起来的命令，就给足 \`planB\`，不要一秒一秒地空轮询。
 
-时间有两道闸：每次 \`js\` 请求最多 1 秒（不含 \`this.call\` 的等待时间；call 执行多久都不占用这 1 秒），到点一定返回 yield park，程序在后台继续跑；\`this.call\` 自身另有窗口——省略 \`planB\` 时 1 秒，给了 \`planB\` 则每 20 字节换 1 秒。看到 yield park 就 \`this.unpark(handle)\` 继续等——命令没死，输出也没丢；不要因为一次 park 就重跑命令。
+时间有两道闸：程序自身计算每次 \`js\` 最多 1 秒（call 等待不计入这 1 秒），到点一定返回 yield park，程序在后台继续跑；等待一条命令的窗口由 \`planB\` 决定——省略 1 秒，给了则每 20 字节换 1 秒，\`this.call\` 与 \`this.unpark\` 都适用。看到 yield park 就用**带 \`planB\` 的** \`this.unpark(handle, undefined, planB)\` 继续等——命令没死，输出也没丢；不要因为一次 park 就重跑命令。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
 
@@ -70,5 +70,5 @@ export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）
 this.cat(path) this.stat(path) this.ls(path) this.where(text,needle) this.whereAll(text,needle) [字面匹配]
 this.search(query[,{topK,maxSnippetLines,content}]) this.findRelated(file,line[,opts]) [Semble 语义索引，repo=当前工作区；依赖 uvx]
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
-this.call(command,planB?) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
-call 只收命令字符串；planB 可选，省略时命令窗口 1s，给了则为字节数 × 50ms；到期 yield park 带 delta；每次 js 最多 1s（call 等待不计入），yield 后用 this.unpark(handle) 继续，不重跑命令；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;
+this.call(command,planB?) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg?,planB?) this.abandon(handle)
+call 只收命令字符串；planB = 这次请求愿意等多久，省略 1s，给了则字节数 × 50ms；call 与 unpark 都适用；到期 yield park 带 delta；程序计算每次 js 最多 1s（call 等待不计入），yield 后用 this.unpark(handle,undefined,planB) 继续，不重跑命令；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;

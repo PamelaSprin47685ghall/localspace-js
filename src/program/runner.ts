@@ -75,7 +75,10 @@ class ProgramRun {
   private wake?: () => void;
   private dead = false;
   private planB?: string;
-  private budgetMs?: number;
+  /** Program-time window for this request; call waiting is billed separately. */
+  private budgetMs = REQUEST_WINDOW_MS;
+  /** How long this request is willing to wait on the active call: the call's planB (bytes × 50ms), else 1s. */
+  private callWaitBudgetMs = CALL_WINDOW_MS;
   /** Window bookkeeping: call time is excluded from the request window. */
   private windowStartedAt = Date.now();
   private callWaitMs = 0;
@@ -113,17 +116,11 @@ class ProgramRun {
     live.add(this);
   }
 
-  /** Wait up to the budget for the next park/end; otherwise hand back a yield park. */
+  /** Wait up to this request's windows for the next park/end; otherwise hand back a yield park. */
   async wait(): Promise<RunProgramResult> {
     const event = await this.next();
     if (!event) {
-      return this.park("yield", {
-        message: `本次请求的等待窗口（${this.budgetMs ?? "∞"} ms）用完，程序仍在后台运行。delta 是自上次 park 以来的新输出；用 this.unpark(handle) 继续等它结束。`,
-        planB: this.planB,
-        budgetMs: this.budgetMs,
-        elapsedMs: Date.now() - this.startedAt,
-        delta: this.hub.takeDelta(),
-      });
+      return this.yieldPark();
     }
     if (event.t === "park") {
       this.merge(event.written);
@@ -158,14 +155,17 @@ class ProgramRun {
 
   private remainingWindowMs(): number {
     const now = Date.now();
-    const countedUntil = this.callActive > 0 ? (this.callStartedAt ?? now) : now;
-    return (this.budgetMs ?? REQUEST_WINDOW_MS) - (countedUntil - this.windowStartedAt - this.callWaitMs);
+    if (this.callActive > 0) {
+      // Call time is billed to the call's own planB window, never to the 1s program window.
+      return Math.max(0, this.callWaitBudgetMs - (now - (this.callStartedAt ?? now)));
+    }
+    return Math.max(0, this.budgetMs - (now - this.windowStartedAt - this.callWaitMs));
   }
 
-  /** Arm the window timer unless a call is in flight (call time is free). */
+  /** The window timer is never absent: every request must end in a park or an end event. */
   private armWindow(): void {
     this.clearWindowTimer();
-    if (!this.wake || this.callActive > 0) return;
+    if (!this.wake) return;
     this.windowTimer = setTimeout(() => {
       this.windowTimer = undefined;
       this.wake?.();
@@ -179,10 +179,14 @@ class ProgramRun {
     }
   }
 
-  private beginCall(): void {
-    if (this.callActive === 0) this.callStartedAt = Date.now();
+  private beginCall(planB: string | undefined): void {
+    if (this.callActive === 0) {
+      this.callStartedAt = Date.now();
+      this.callWaitBudgetMs = planB === undefined ? CALL_WINDOW_MS : Buffer.byteLength(planB, "utf8") * 50;
+      this.planB = planB;
+    }
     this.callActive += 1;
-    this.clearWindowTimer();
+    this.armWindow();
   }
 
   private endCall(): void {
@@ -195,11 +199,12 @@ class ProgramRun {
     }
   }
 
-  /** A resumed program gets a fresh window; calls still running stay free. */
-  private resetWindow(): void {
+  /** A resumed program gets a fresh 1s program window plus the wait budget its unpark bought. */
+  private resetWindow(waitBudgetMs?: number): void {
     const now = Date.now();
     this.windowStartedAt = now;
     this.callWaitMs = 0;
+    if (waitBudgetMs !== undefined) this.callWaitBudgetMs = waitBudgetMs;
     if (this.callActive > 0) this.callStartedAt = now;
     this.armWindow();
   }
@@ -210,14 +215,28 @@ class ProgramRun {
     this.wake?.();
   }
 
+  /** Payload of a request-window expiry: the program (and any call) keeps running in the background. */
+  private yieldPark(): RunProgramResult {
+    const waitingOnCall = this.callActive > 0;
+    const budgetMs = waitingOnCall ? this.callWaitBudgetMs : this.budgetMs;
+    return this.park("yield", {
+      message: waitingOnCall
+        ? `call 的等待窗口（${budgetMs} ms）用完了，命令仍在后台运行。delta 是自上次 park 以来的新输出；用 this.unpark(handle, undefined, planB) 继续等它结束，planB 决定这次愿意等多久。`
+        : `本次请求的等待窗口（${budgetMs} ms）用完，程序仍在后台运行。delta 是自上次 park 以来的新输出；用 this.unpark(handle, undefined, planB) 继续等它结束，planB 决定这次愿意等多久。`,
+      ...(this.planB === undefined ? {} : { planB: this.planB }),
+      budgetMs,
+      elapsedMs: Date.now() - this.startedAt,
+      delta: this.hub.takeDelta(),
+    });
+  }
+
   private park(kind: ParkKind, payload: unknown, resumeId?: number): RunProgramResult {
     const site = this.parkTable.create(
       this.input.workspaceId,
       kind,
       payload,
-      async (value, budgetMs) => {
-        this.budgetMs = budgetMs ?? REQUEST_WINDOW_MS;
-        this.resetWindow();
+      async (value, waitBudgetMs) => {
+        this.resetWindow(waitBudgetMs);
         // A yield never injects the client's argument as the call result: the command keeps
         // running and the worker receives its real CallResult when it exits. Only explicit
         // parks (where/confirm/park) resume by handing `value` back to the program.
@@ -281,17 +300,12 @@ class ProgramRun {
     }
     if (msg.t === "call") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
-      const planB = msg.planB;
-      const budgetMs = planB === undefined ? CALL_WINDOW_MS : Buffer.byteLength(planB, "utf8") * 50;
       const call = this.hub.call(msg.command, msg.opts);
-      this.beginCall();
-      void call.then(() => this.endCall(), () => this.endCall());
-      const expired = Promise.withResolvers<"yield">();
-      const timer = setTimeout(() => expired.resolve("yield"), budgetMs);
-      timer.unref();
-      let outcome: Awaited<typeof call> | "yield";
+      this.beginCall(msg.planB);
       try {
-        outcome = await Promise.race([call, expired.promise]);
+        // The request window (not this await) decides when the caller gets a park. The worker
+        // stays suspended on this promise and receives the real CallResult whenever it arrives.
+        return { call: await call };
       } catch (error) {
         return {
           error: isProgramError(error)
@@ -299,39 +313,8 @@ class ProgramRun {
             : { code: "CALL_FAILED", message: error instanceof Error ? error.message : String(error) },
         };
       } finally {
-        clearTimeout(timer);
+        this.endCall();
       }
-      if (outcome !== "yield") return { call: outcome };
-      const delta = this.hub.takeDelta();
-      this.push({
-        t: "park",
-        id: msg.id,
-        kind: "yield",
-        payload: {
-          message:
-            planB === undefined
-              ? "this.call 的 1 秒等待窗口用完了，命令仍在后台运行。this.unpark(handle) 继续等它结束；不会丢失输出。"
-              : "planB 买的时间用完了，命令仍在后台运行。this.unpark(handle) 继续等它结束；不会丢失输出。",
-          ...(planB === undefined ? {} : { planB }),
-          budgetMs,
-          delta,
-        },
-        written: [...this.written],
-      });
-      // Keep the call alive and deliver its real result once it exits, so a resumed
-      // program sees the full CallResult (stdout/stderr/exitCode) instead of the park arg.
-      void call.then(
-        (result) => this.send({ t: "reply", id: msg.id, call: result }),
-        (error) =>
-          this.send({
-            t: "reply",
-            id: msg.id,
-            error: isProgramError(error)
-              ? { code: error.code, message: error.message }
-              : { code: "CALL_FAILED", message: error instanceof Error ? error.message : String(error) },
-          }),
-      );
-      return new Promise(() => {});
     }
     const site = this.parkTable.take(msg.handle);
     if (!site) return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}` } };
@@ -342,7 +325,16 @@ class ProgramRun {
       await site.abandon();
       return {};
     }
-    const result = await site.resume(msg.value, this.budgetMs);
+    const waitBudgetMs = msg.planB === undefined ? CALL_WINDOW_MS : Buffer.byteLength(msg.planB, "utf8") * 50;
+    // Resuming waits on the other program: this request is billed by its own planB, not by the
+    // 1s compute window, so `unpark(handle, undefined, planB)` can wait as long as it asked for.
+    this.beginCall(msg.planB);
+    let result: ParkResumeResult;
+    try {
+      result = await site.resume(msg.value, waitBudgetMs);
+    } finally {
+      this.endCall();
+    }
     if (result.status === "parked") return { repark: result };
     if (result.status === "done") return { value: result.value, written: result.written };
     return { error: result.error ?? { code: "ABANDONED", message: "现场已放弃" } };

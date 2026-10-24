@@ -56,7 +56,8 @@ const surface = createProgramApi({
 // 万象术风格：全部原语挂在 this 上（this.cat / this.call / this.unpark …）
 const api = {
   ...surface,
-  unpark: (handle: string, value?: unknown) => ask((id) => ({ t: "unpark", id, handle, value })),
+  unpark: (handle: string, value?: unknown, planB?: string) =>
+    ask((id) => ({ t: "unpark", id, handle, value, planB })),
   abandon: async (handle: string) => {
     await ask((id) => ({ t: "abandon", id, handle }));
   },

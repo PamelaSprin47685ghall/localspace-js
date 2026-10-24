@@ -2,6 +2,7 @@
 import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { RequestHandler } from "express";
+import { trackInflight } from "./inflight.js";
 
 const HOUR = 3_600_000;
 const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, 13).replace(/[-T]/g, "");
@@ -13,6 +14,17 @@ const redact = (headers: Record<string, unknown>) =>
 const parse = (text: string): unknown => {
   try { return JSON.parse(text); } catch { return text; }
 };
+
+function rpcInfo(body: unknown): { tool?: string; workspaceId?: string } {
+  if (!body || typeof body !== "object") return {};
+  const params = (body as Record<string, unknown>).params;
+  if (!params || typeof params !== "object") return {};
+  const record = params as Record<string, unknown>;
+  const tool = typeof record.name === "string" ? record.name : undefined;
+  const args = record.arguments && typeof record.arguments === "object" ? (record.arguments as Record<string, unknown>) : undefined;
+  const workspaceId = typeof args?.workspaceId === "string" ? args.workspaceId : undefined;
+  return { tool, workspaceId };
+}
 
 export function trafficLog(stateDir: string, enabled = true): RequestHandler {
   const dir = join(stateDir, "traffic");
@@ -35,6 +47,11 @@ export function trafficLog(stateDir: string, enabled = true): RequestHandler {
   return (req, res, next) => {
     if (!enabled) return next();
     const t0 = Date.now();
+    const requestId = String(res.locals.requestId ?? "");
+    const info = rpcInfo(req.body);
+    // A start record without an end record is a request that is still (or was) hung.
+    void append({ phase: "start", ts: new Date(t0).toISOString(), requestId, method: req.method, ...info }).catch(() => undefined);
+    const release = trackInflight({ requestId, method: req.method, ...info });
     const chunks: Buffer[] = [];
     const grab = (c: unknown, enc?: unknown) => {
       if (c == null || typeof c === "function") return;
@@ -43,8 +60,10 @@ export function trafficLog(stateDir: string, enabled = true): RequestHandler {
     const { write, end } = res;
     res.write = function (this: typeof res, c: unknown, ...rest: unknown[]) { grab(c, rest[0]); return (write as Function).call(this, c, ...rest); } as typeof res.write;
     res.end = function (this: typeof res, c?: unknown, ...rest: unknown[]) { grab(c, rest[0]); return (end as Function).call(this, c, ...rest); } as typeof res.end;
-    res.on("close", () => {
+    res.once("close", () => {
+      release();
       void append({
+        phase: "end",
         ts: new Date(t0).toISOString(),
         requestId: res.locals.requestId,
         method: req.method,
