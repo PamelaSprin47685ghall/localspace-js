@@ -5,7 +5,7 @@
 把原先细碎、常拦截的 MCP 工具面，换成两个工具：
 
 1. **`open_workspace`** — 打开允许根内的本地目录，返回 `workspaceId` 与中文**总纲**
-2. **`js`** — 唯一的读 / 写 / 执行入口：输入 `{ workspaceId?, program }`
+2. **`js`** — 唯一的读 / 写 / 执行入口：输入 `{ workspaceId?, program, planB }`
 
 `workspaceId` 由目录决定、稳定不变：同一文件夹重复 `open_workspace` 返回同一个 id，服务重启后也能恢复。`workspaceId` 可以省略（复用最近使用的工作区），也可以直接传项目根目录路径；未知 id 的报错会列出当前候选，不需要反复重开工作区。
 
@@ -27,21 +27,28 @@
 - 客户端断开（AbortSignal）**不杀程序**：程序与命令继续在后台跑，现场留在 `parked:` 列表里，回来 `this.unpark(handle)` 取结果，不要重跑
 - 等待窗口永远有定时器兜底：命令卡死、`sleep` 不返回、等 stdin 的 call 也一定到点返回 `yield`，不会挂住客户端
 - 程序运行在独立 worker 线程：主线程只做 HTTP/MCP 与计时，死循环也会按时 yield，不会卡住服务
-- 每个 `this.call` 独占进程组；程序结束、`this.abandon`、现场过期（`LOCALSPACE_PARK_TTL_MS`，默认 30 分钟）、请求取消或服务关闭时整组 SIGTERM→SIGKILL
+- 每个 `this.call` 独占进程组；程序结束、`this.abandon`、现场过期（`LOCALSPACE_PARK_TTL_MS`，默认 30 分钟）或服务关闭时整组 SIGTERM→SIGKILL
 - 输出每路仅保留末尾 128KiB（`truncatedBytes` 标明丢弃量）；`this.cat` 上限 8MiB；返回值上限 1MiB；MCP 请求体上限 8MB
 - 主线程事件循环延迟超过 500ms 时记录 `event_loop_lag` 警告，`/healthz` 附带最近窗口
 - 危险操作（递归删除、强推、格式化…）自动 `confirm` park；`this.unpark(handle, { dangerous: true })` 强制继续
 - 硬性拒绝：路径越出 `allowedRoots`、改写 `auth.json`
 - 工具结果在 `\u0000\uFEFF`（NUL+BOM）之后附带 Pair Hint（`now` ISO UTC 时间、git 脏度、park 现场等）；`structuredContent.servedAt` 是同一时间，模型据此知道“现在几点”
 
-### `this.call`
+### 顶层等待窗口
 
-```js
-const out = await this.call("npm test");            // 缺省 1 秒窗口
-await this.call("npm test", "跳过测试并报告风险");   // planB 字节数 × 50ms
+提交工具参数：
+
+```json
+{
+  "workspaceId": "当前工作区 id",
+  "planB": "等待测试完成；到期后保留原命令，检查输出并显式恢复，不重复启动测试。",
+  "program": "const out = await this.call(\"npm test\"); return out;"
+}
 ```
 
-命令到期未结束就 `yield` park；输出在 `delta` 里，命令继续在后台跑，`this.unpark(handle, undefined, planB)` 拿到最终 `CallResult`，不要重跑。
+实际预算为 `min(UTF8Bytes(planB) × 50ms, 30000ms)`，在准入时形成一个绝对截止时间。连续命令和恢复目标都只使用剩余时间。程序内 `const planB = 'x'.repeat(48000)` 不参与预算；`call(command, planB)` 和三参数 `unpark` 会被拒绝。
+
+到期时命令可以继续在后台运行，新增输出放在 `delta`。新的工具请求提供顶层 `planB`，程序体用 `return await this.unpark(handle);` 取回最终结果。已启动命令不重跑；worker 的本地计算及直接文件 API 保留既有后台行为，新命令和恢复请求在期限后等待显式恢复。
 
 ## 代码搜索依赖 `uvx`
 
@@ -57,16 +64,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ## 示例
 
 ```js
-// open_workspace 之后：
+// open_workspace 之后，以下源码放入 program；同次工具请求另带顶层 planB：
 const text = await this.cat("README.md");
 const [a, b] = await this.where(text, "## Install");
 await this.write("README.md", text.slice(0, a) + "## Setup" + text.slice(b));
 const hits = await this.search("解析 MCP initialize 请求的函数");
-const out = await this.call("npm test", "跳过测试，改为报告未验证风险");
+const out = await this.call("npm test");
 return { exit: out.exitCode, files: hits.results?.map((r) => r.file_path) };
 ```
 
-恢复挂起：
+恢复挂起时，新工具请求仍须携带顶层 `planB`：
 
 ```js
 return await this.unpark("pk_…", { dangerous: true });

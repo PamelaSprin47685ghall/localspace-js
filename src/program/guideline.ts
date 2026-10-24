@@ -11,7 +11,7 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 优先使用 \`js\`。需要打开或切换目录时先 \`open_workspace\`。不要寻找已退役的 read/edit/write/bash/exec_command。
 
-\`js\` 的输入是 \`{ workspaceId?, program }\`。\`workspaceId\` 由目录决定、稳定不变；省略即复用最近使用的工作区，也可直接传项目根目录路径。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
+\`js\` 的输入是 \`{ workspaceId?, program, planB }\`。\`workspaceId\` 由目录决定、稳定不变；省略即复用最近使用的工作区，也可直接传项目根目录路径。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
 
 - 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.search(query, opts?)\`（语义索引，repo 绑定当前工作区）、\`this.findRelated(file, line, opts?)\`、\`this.where\`（字面匹配）、\`this.whereAll\`（字面匹配）
   - \`this.search\` 由内置的 Semble（经 \`uvx\` 启动）提供：传函数名/行为描述，返回 \`{ query, results: [{ file_path, start_line, end_line, score, content? }] }\`。\`opts\` 可为 \`{ topK, maxSnippetLines, content }\`；首次调用要下载依赖并建索引，可能超过一个等待窗口——到点照常 yield，\`this.unpark(handle)\` 继续等即可，不要重发查询。
