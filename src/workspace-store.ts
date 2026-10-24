@@ -37,6 +37,13 @@ export interface WorkspaceStore {
   close?(): void;
 }
 
+/** Strictly increasing ISO timestamps, so same-millisecond writes still have a stable order. */
+let lastStampMs = 0;
+function nextStamp(): string {
+  lastStampMs = Math.max(Date.now(), lastStampMs + 1);
+  return new Date(lastStampMs).toISOString();
+}
+
 export class SqliteWorkspaceStore implements WorkspaceStore {
   private readonly database: DatabaseHandle;
 
@@ -53,7 +60,7 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
     baseSha?: string;
     managed?: boolean;
   }): WorkspaceSession {
-    const now = new Date().toISOString();
+    const now = nextStamp();
     const session: WorkspaceSession = {
       id: input.id,
       root: input.root,
@@ -123,7 +130,7 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
   touchSession(id: string): void {
     this.database.db
       .update(workspaceSessions)
-      .set({ lastUsedAt: new Date().toISOString() })
+      .set({ lastUsedAt: nextStamp() })
       .where(eq(workspaceSessions.id, id))
       .run();
   }

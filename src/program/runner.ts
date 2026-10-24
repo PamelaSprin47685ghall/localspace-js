@@ -103,7 +103,15 @@ class ProgramRun {
   /** Wait up to the budget for the next park/end; otherwise hand back a yield park. */
   async wait(): Promise<RunProgramResult> {
     const event = await this.next();
-    if (!event) return this.park("yield", { message: "planB 买的时间用完了，程序仍在后台运行。先重读你的 planB：够用就 this.abandon 改走它；不够再 unpark 续跑（续跑按新 planB 重新计价）。", planB: this.planB, budgetMs: this.budgetMs, elapsedMs: Date.now() - this.startedAt });
+    if (!event) {
+      return this.park("yield", {
+        message: `本次请求的等待窗口（${this.budgetMs ?? "∞"} ms）用完，程序仍在后台运行。delta 是自上次 park 以来的新输出；用 this.unpark(handle) 继续等它结束。`,
+        planB: this.planB,
+        budgetMs: this.budgetMs,
+        elapsedMs: Date.now() - this.startedAt,
+        delta: this.hub.takeDelta(),
+      });
+    }
     if (event.t === "park") {
       this.merge(event.written);
       return this.park(event.kind, event.payload, event.id);
@@ -151,7 +159,12 @@ class ProgramRun {
       payload,
       async (value, budgetMs) => {
         this.budgetMs = budgetMs;
-        if (resumeId !== undefined && !this.dead) this.send({ t: "resume", id: resumeId, value });
+        // A yield never injects the client's argument as the call result: the command keeps
+        // running and the worker receives its real CallResult when it exits. Only explicit
+        // parks (where/confirm/park) resume by handing `value` back to the program.
+        if (kind !== "yield" && resumeId !== undefined && !this.dead) {
+          this.send({ t: "resume", id: resumeId, value });
+        }
         return this.wait();
       },
       async () => this.kill(endWith("abandoned", "ABANDONED", "现场已放弃")),
@@ -198,31 +211,50 @@ class ProgramRun {
     if (msg.t === "call") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
       const budgetMs = Buffer.byteLength(msg.planB, "utf8") * 50;
-      let timer: NodeJS.Timeout | undefined;
-      const timedOut = new Promise<"yield">((resolve) => (timer = setTimeout(() => resolve("yield"), budgetMs)));
+      const call = this.hub.call(msg.command, msg.opts);
+      const expired = Promise.withResolvers<"yield">();
+      const timer = setTimeout(() => expired.resolve("yield"), budgetMs);
+      timer.unref();
+      let outcome: Awaited<typeof call> | "yield";
       try {
-        const outcome = await Promise.race([this.hub.call(msg.command, msg.opts), timedOut]);
-        clearTimeout(timer);
-        if (outcome === "yield") {
-          const delta = this.hub.takeDelta();
-          this.push({
-            t: "park",
-            id: msg.id,
-            kind: "yield",
-            payload: { message: "planB 买的时间用完了。", planB: msg.planB, budgetMs, delta },
-            written: [...this.written],
-          });
-          return new Promise(() => {});
-        }
-        return { call: outcome };
+        outcome = await Promise.race([call, expired.promise]);
       } catch (error) {
-        clearTimeout(timer);
         return {
           error: isProgramError(error)
             ? { code: error.code, message: error.message }
             : { code: "CALL_FAILED", message: error instanceof Error ? error.message : String(error) },
         };
+      } finally {
+        clearTimeout(timer);
       }
+      if (outcome !== "yield") return { call: outcome };
+      const delta = this.hub.takeDelta();
+      this.push({
+        t: "park",
+        id: msg.id,
+        kind: "yield",
+        payload: {
+          message: "planB 买的时间用完了，命令仍在后台运行。this.unpark(handle) 继续等它结束；不会丢失输出。",
+          planB: msg.planB,
+          budgetMs,
+          delta,
+        },
+        written: [...this.written],
+      });
+      // Keep the call alive and deliver its real result once it exits, so a resumed
+      // program sees the full CallResult (stdout/stderr/exitCode) instead of the park arg.
+      void call.then(
+        (result) => this.send({ t: "reply", id: msg.id, call: result }),
+        (error) =>
+          this.send({
+            t: "reply",
+            id: msg.id,
+            error: isProgramError(error)
+              ? { code: error.code, message: error.message }
+              : { code: "CALL_FAILED", message: error instanceof Error ? error.message : String(error) },
+          }),
+      );
+      return new Promise(() => {});
     }
     const site = this.parkTable.take(msg.handle);
     if (!site) return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}` } };

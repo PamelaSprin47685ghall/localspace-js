@@ -164,3 +164,43 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
 
 assert.equal(liveProgramCount(), 0);
 console.log("hardening.test.ts: all ok");
+
+// A call that outlives its planB keeps running: unpark delivers the real CallResult (not the
+// park argument), and output produced before the yield is still in the final result.
+{
+  const table = new ParkTable(60_000);
+  const first = await run(
+    `return await this.call("echo EARLY; sleep 0.6; echo LATE", "x");`,
+    { budget: 5000, parkTable: table },
+  );
+  assert.equal(first.parked?.kind, "yield");
+  const payload = first.parked!.payload as { delta?: { stdout: string } };
+  assert.match(payload.delta?.stdout ?? "", /EARLY/);
+  await sleep(900);
+  const resumed = await run(
+    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, { planB: "not a CallResult" });`,
+    { budget: 5000, parkTable: table },
+  );
+  assert.equal(resumed.status, "done", JSON.stringify(resumed));
+  const v = resumed.value as { exitCode: number; stdout: string; planB?: string };
+  assert.equal(v.exitCode, 0);
+  assert.match(v.stdout, /EARLY/);
+  assert.match(v.stdout, /LATE/);
+  assert.equal(v.planB, undefined);
+  console.log("yield keeps call alive + real result: ok");
+}
+
+// Parallel calls keep their own output (one parked proc must not clobber another).
+{
+  const r = await run(
+    `const [a, b] = await Promise.all([
+      this.call("sleep 0.3; echo A", "p".repeat(40)),
+      this.call("sleep 0.3; echo B", "p".repeat(40)),
+    ]);
+    return { a: a.stdout.trim(), b: b.stdout.trim() };`,
+    { budget: 10_000 },
+  );
+  assert.equal(r.status, "done", JSON.stringify(r));
+  assert.deepEqual(r.value, { a: "A", b: "B" });
+  console.log("parallel calls keep separate output: ok");
+}

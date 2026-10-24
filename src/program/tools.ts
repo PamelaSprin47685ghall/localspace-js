@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { ServerConfig } from "../config.js";
 import type { WorkspaceRegistry } from "../workspaces.js";
 import type { AuditLogManager } from "../audit-log.js";
@@ -89,8 +90,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         const hints = composePairHints({
           workspaceId: body.workspaceId,
           root: body.root,
-          branch: gitBranch(body.root),
-          git: gitDirty(body.root),
+          ...(await gitHint(body.root)),
           parked: globalParkTable.list(body.workspaceId),
           restart: takeRestartHint(),
           motto: GUIDELINE_MOTTO,
@@ -164,6 +164,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           configDir,
           stateDir: config.stateDir,
           program,
+          yieldBudgetMs: config.yieldBudgetMs,
           signal: ctx.mcpReq.signal,
         });
 
@@ -180,8 +181,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
         const hints = composePairHints({
           workspaceId: workspace.id,
           root: workspace.root,
-          branch: gitBranch(workspace.root),
-          git: gitDirty(workspace.root),
+          ...(await gitHint(workspace.root)),
           parked: globalParkTable.list(workspace.id),
           yieldPark: result.status === "parked" && result.parked?.kind === "yield",
           restart: takeRestartHint(),
@@ -262,18 +262,47 @@ function formatJsResult(result: {
   return lines.join("\n");
 }
 
-function gitBranch(root: string): string | undefined {
-  const result = spawnSync("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"], {
-    encoding: "utf8",
-  });
-  if (result.status !== 0) return undefined;
-  return result.stdout.trim() || undefined;
+interface GitHint {
+  branch?: string;
+  git?: { staged: number; unstaged: number; untracked: number; dirty: boolean };
 }
 
-function gitDirty(root: string) {
-  const result = spawnSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
-  if (result.status !== 0) return undefined;
-  const lines = result.stdout.split("\n").filter(Boolean);
+const execFileAsync = promisify(execFile);
+const GIT_HINT_TTL_MS = 5_000;
+const GIT_TIMEOUT_MS = 2_000;
+const gitHints = new Map<string, { at: number; hint: Promise<GitHint> }>();
+
+/** Hints are advisory: async + cached so `git status` never blocks the event loop for other clients. */
+function gitHint(root: string): Promise<GitHint> {
+  const cached = gitHints.get(root);
+  if (cached && Date.now() - cached.at < GIT_HINT_TTL_MS) return cached.hint;
+  const hint = readGitHint(root).catch(() => ({}));
+  gitHints.set(root, { at: Date.now(), hint });
+  if (gitHints.size > 64) {
+    for (const [key, entry] of gitHints) {
+      if (Date.now() - entry.at >= GIT_HINT_TTL_MS) gitHints.delete(key);
+    }
+  }
+  return hint;
+}
+
+async function readGitHint(root: string): Promise<GitHint> {
+  const [branch, status] = await Promise.all([
+    execFileAsync("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+    }).then((r) => r.stdout.trim() || undefined).catch(() => undefined),
+    execFileAsync("git", ["-C", root, "status", "--porcelain"], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+    }).then((r) => countChanges(r.stdout)).catch(() => undefined),
+  ]);
+  return { branch, git: status };
+}
+
+function countChanges(output: string): GitHint["git"] {
+  const lines = output.split("\n").filter(Boolean);
   let staged = 0;
   let unstaged = 0;
   let untracked = 0;

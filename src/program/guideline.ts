@@ -15,13 +15,13 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 - 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.rg(argv)\`、\`this.where\`（字面匹配）、\`this.whereAll\`（字面匹配）
 - 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
-- 执行：\`this.call(command, planB)\`。\`planB\` 必填，是不跑该命令时的替代方案；它的 UTF-8 字节数 × 50ms 是自动 yield 的时限。缺 planB 以 CALL_COMMAND_UNSUPPORTED 失败。
+- 执行：\`this.call(command, planB)\`。\`planB\` 必填，是不跑该命令时的替代方案；它的 UTF-8 字节数 × 50ms 是这条命令的 yield 时限。缺 planB 以 CALL_COMMAND_UNSUPPORTED 失败。
   - \`this.signal(sig)\` 与 \`this.send(input)\` 作用在让这次程序 park 的那条 call 上。没有这样一条仍在跑的命令时是 CALL_CHILD_UNKNOWN。
-  - 自动 park 的载荷带 \`delta: { stdout, stderr }\`。
+  - 自动 park 的载荷带 \`delta: { stdout, stderr }\`：自上次 park 以来的新输出；命令最终结果仍在 \`CallResult\` 里，不会因为 yield 丢失。
 - 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
-- 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段
+- 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段。yield 现场的 \`arg\` 不注入命令结果；where/confirm/park 现场才用 \`arg\` 续跑。
 
-时间挂在 \`this.call\` 上：命令必须写 \`planB\`。每 20 字节换 1 秒，用完该命令自动 yield park。到点 park 后先重读自己的 planB，够用就 abandon，不够再写新的 planB 继续。工具参数没有 planB，程序不会因空 planB 立刻停。
+时间有两道闸：每次 \`js\` 请求本身有等待窗口（默认 20 秒，\`LOCALSPACE_YIELD_BUDGET_MS\`），到点一定返回 yield park，程序在后台继续跑；\`this.call\` 另有 \`planB\` 买的时限（每 20 字节换 1 秒）。看到 yield park 就 \`this.unpark(handle)\` 继续等——命令没死，输出也没丢；不要因为一次 park 就重跑命令。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
 
@@ -68,4 +68,4 @@ export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）
 this.cat(path) this.stat(path) this.ls(path) this.rg(argv) this.where(text,needle) this.whereAll(text,needle) [字面匹配]
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
 this.call(command,planB) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
-call 只收命令字符串，planB 必填；时限 = planB 字节数 × 50ms，到期 yield park 带 delta；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;
+call 只收命令字符串，planB 必填；时限 = planB 字节数 × 50ms，到期 yield park 带 delta；每次 js 请求另有 20s 等待窗口，yield 后用 this.unpark(handle) 继续，不重跑命令；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;

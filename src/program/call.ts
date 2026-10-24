@@ -35,6 +35,9 @@ export type CallOpts = { maxOutputBytes?: number };
 class Proc {
   readonly stdout: TailBuffer;
   readonly stderr: TailBuffer;
+  /** Snapshot stream handed back by a yield park; never consumes the buffers `result()` reports. */
+  readonly deltaStdout: TailBuffer;
+  readonly deltaStderr: TailBuffer;
   readonly startedAt = Date.now();
   exitCode: number | null = null;
   signal?: string;
@@ -49,8 +52,16 @@ class Proc {
   ) {
     this.stdout = new TailBuffer(cap);
     this.stderr = new TailBuffer(cap);
-    child.stdout?.on("data", (c: Buffer) => this.stdout.push(c));
-    child.stderr?.on("data", (c: Buffer) => this.stderr.push(c));
+    this.deltaStdout = new TailBuffer(cap);
+    this.deltaStderr = new TailBuffer(cap);
+    child.stdout?.on("data", (c: Buffer) => {
+      this.stdout.push(c);
+      this.deltaStdout.push(c);
+    });
+    child.stderr?.on("data", (c: Buffer) => {
+      this.stderr.push(c);
+      this.deltaStderr.push(c);
+    });
     this.exitPromise = new Promise((resolve) => {
       child.once("exit", (code, sig) => {
         this.exited = true;
@@ -94,10 +105,18 @@ class Proc {
       ...(this.pgid ? { pid: this.pgid } : {}),
     };
   }
+
+  /** Bytes produced since the previous yield; clears only the delta buffers. */
+  takeDelta(): { stdout: string; stderr: string } {
+    return { stdout: this.deltaStdout.take(), stderr: this.deltaStderr.take() };
+  }
 }
 
 export class CallHub {
-  private parked: Proc | undefined;
+  /** Live calls in spawn order: parallel `this.call` must not clobber each other. */
+  private readonly active = new Map<number, Proc>();
+  private last: Proc | undefined;
+  private seq = 0;
   private readonly groups = new Set<number>();
 
   constructor(private readonly ctx: CallContext) {}
@@ -107,12 +126,17 @@ export class CallHub {
       throw new ProgramError("CALL_COMMAND_UNSUPPORTED", "this.call 需要一条命令字符串。");
     }
     const proc = this.start(command, opts.maxOutputBytes);
-    this.parked = proc;
-    await proc.settle();
-    const result = proc.result();
-    this.reap(proc);
-    this.parked = undefined;
-    return result;
+    const key = ++this.seq;
+    this.active.set(key, proc);
+    this.last = proc;
+    try {
+      await proc.settle();
+      return proc.result();
+    } finally {
+      this.reap(proc);
+      this.active.delete(key);
+      if (this.last === proc) this.last = [...this.active.values()].at(-1);
+    }
   }
 
   async send(input: string): Promise<void> {
@@ -128,15 +152,21 @@ export class CallHub {
   }
 
   takeDelta(): { stdout: string; stderr: string } {
-    if (!this.parked) return { stdout: "", stderr: "" };
-    return { stdout: this.parked.stdout.take(), stderr: this.parked.stderr.take() };
+    const merged = { stdout: "", stderr: "" };
+    for (const proc of this.active.values()) {
+      const delta = proc.takeDelta();
+      merged.stdout += delta.stdout;
+      merged.stderr += delta.stderr;
+    }
+    return merged;
   }
 
   /** Kill every process group this hub started (SIGTERM, then SIGKILL). */
   dispose(): void {
     for (const pgid of this.groups) killGroup(pgid);
     this.groups.clear();
-    this.parked = undefined;
+    this.active.clear();
+    this.last = undefined;
   }
 
   private start(command: string, cap?: number): Proc {
@@ -158,7 +188,7 @@ export class CallHub {
   }
 
   private requireParked(): Proc {
-    const proc = this.parked;
+    const proc = this.last;
     if (!proc || proc.exited) {
       throw new ProgramError("CALL_CHILD_UNKNOWN", "没有一条仍在跑、并让本次程序 park 的 call。");
     }
