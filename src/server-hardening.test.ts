@@ -42,6 +42,22 @@ async function listen(authMode: string) {
   };
   return { base, stop };
 }
+const listenWith = (authMode: string, extra: Record<string, string>) => {
+  const server = createServer(loadConfig({ ...env(authMode), ...extra }));
+  const http = server.app.listen(0, "127.0.0.1");
+  return new Promise<{ base: string; close: () => Promise<void> }>((resolve) => {
+    http.once("listening", () => {
+      resolve({
+        base: `http://127.0.0.1:${(http.address() as AddressInfo).port}`,
+        close: async () => {
+          await server.close();
+          http.closeAllConnections();
+          http.close();
+        },
+      });
+    });
+  });
+};
 
 const { base, stop } = await listen("none");
 const MODERN = "2026-07-28";
@@ -217,6 +233,30 @@ await stop();
   });
   assert.equal(ok.status, 200, await ok.clone().text());
   console.log("valid bearer -> 200: ok");
+
+  // Grok-style connector: no OAuth flow, one fixed token via header or ?token=.
+  const staticToken = "static-connector-token-0123456789";
+  const s = await listenWith("oauth", { LOCALSPACE_MCP_TOKEN: staticToken });
+  const viaHeader = await fetch(`${s.base}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${staticToken}`, "mcp-protocol-version": "2025-06-18" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  assert.equal(viaHeader.status, 200, await viaHeader.clone().text());
+  const viaQuery = await fetch(`${s.base}/mcp?token=${staticToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  assert.equal(viaQuery.status, 200, await viaQuery.clone().text());
+  const wrongToken = await fetch(`${s.base}/mcp?token=${staticToken}x`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  assert.equal(wrongToken.status, 401, await wrongToken.clone().text());
+  await s.close();
+  console.log("static connector token via header and ?token=: ok");
   for (const path of ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp"]) {
     assert.equal((await fetch(`${o.base}${path}`)).status, 200, path);
   }

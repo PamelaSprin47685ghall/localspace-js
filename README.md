@@ -73,6 +73,19 @@ return await this.unpark("pk_…", { dangerous: true });
 return await this.unpark("pk_…", [begin, end]);
 ```
 
+## 不支持 OAuth 的客户端（Grok）
+
+ChatGPT 走完整的 OAuth：`/register` → `/authorize`（填 owner token）→ `/token`。
+Grok 的 connector 只接受一个 URL，探测时连 `Authorization` 头都不带，`/mcp` 直接 401，连不上。
+
+固定 token 默认就是 OAuth 的 owner token（`~/.localspace/auth.json` 里的 `ownerToken`），不需要新密码；要改用别的值就设 `LOCALSPACE_MCP_TOKEN`（至少 16 字符）。二选一：
+
+- URL 里带：`https://<你的域名>/mcp?token=<ownerToken>`
+- 请求头里带：`Authorization: Bearer <ownerToken>`（`grok mcp add --header` 或 xAI API 的 `authorization` 参数）
+
+固定 token 与 OAuth 并存：`/mcp` 先认固定 token，认不出再走原来的 Bearer/OAuth 校验；`authMode` 仍是 `oauth`，浏览器流程不受影响。
+注意：`?token=` 会进反向代理（Caddy）的访问日志，只在不支持请求头的连接器上用。
+
 ## 运行
 
 ```bash

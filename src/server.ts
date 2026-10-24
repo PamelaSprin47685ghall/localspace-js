@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -145,17 +145,32 @@ export function createServer(config = loadConfig()): RunningServer {
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const bearerAuth = requireBearerAuth({
+    verifier: oauthProvider,
+    requiredScopes: [config.oauth.scopes[0] ?? "localspace"],
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+  });
   const authenticate: RequestHandler =
     config.authMode === "none"
       ? (req, _res, next) => {
           req.auth = { token: "", clientId: "local", scopes: [], resource: resourceServerUrl };
           next();
         }
-      : requireBearerAuth({
-          verifier: oauthProvider,
-          requiredScopes: [config.oauth.scopes[0] ?? "localspace"],
-          resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
-        });
+      : (req, res, next) => {
+          // Grok (and other connectors that only accept a URL) cannot fill the interactive
+          // owner-password form: accept one fixed token, as a bearer header or `?token=`.
+          if (matchesStaticToken(req, config.mcpToken)) {
+            req.auth = {
+              token: "",
+              clientId: "static-token",
+              scopes: [config.oauth.scopes[0] ?? "localspace"],
+              resource: resourceServerUrl,
+            };
+            next();
+            return;
+          }
+          bearerAuth(req, res, next);
+        };
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const auditLog = new AuditLogManager(config.audit);
@@ -279,6 +294,19 @@ export function createServer(config = loadConfig()): RunningServer {
       return closePromise;
     },
   };
+}
+
+/** Constant-time check of the fixed token in `Authorization: Bearer …` or `?token=…`. */
+function matchesStaticToken(req: Request, token: string | undefined): boolean {
+  if (!token) return false;
+  const header = req.header("authorization") ?? "";
+  const bearer = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim();
+  const query = typeof req.query.token === "string" ? req.query.token.trim() : undefined;
+  const provided = bearer || query;
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /** The SDK answers malformed/unsupported requests with 4xx itself; record why. */

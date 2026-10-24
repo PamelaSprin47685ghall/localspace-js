@@ -29,6 +29,8 @@ export interface ServerConfig {
   port: number;
   oauth: OAuthConfig;
   authMode: AuthMode;
+  /** Optional fixed bearer/query token for clients that cannot run OAuth (Grok connectors). */
+  mcpToken?: string;
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
@@ -264,6 +266,16 @@ function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined
   };
 }
 
+/** Optional: one fixed token for clients that cannot complete the interactive OAuth form. */
+function parseMcpToken(value: string | undefined): string | undefined {
+  const token = value?.trim();
+  if (!token) return undefined;
+  if (token.length < 16) {
+    throw new Error("LOCALSPACE_MCP_TOKEN must be at least 16 characters long.");
+  }
+  return token;
+}
+
 function defaultStateDir(): string {
   const defaultDir = join(homedir(), ".local", "share", "localspace");
   const fallbackDir = join(homedir(), ".local", "share", "devspace");
@@ -303,10 +315,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   ];
   const stateDir = resolve(expandHomePath(env.LOCALSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir()));
 
+  const oauth = parseOAuthConfig(env, files.auth.ownerToken);
   return {
     host,
     port,
-    oauth: parseOAuthConfig(env, files.auth.ownerToken),
+    oauth,
+    // Same password as the OAuth owner token unless an explicit connector token is set.
+    mcpToken: parseMcpToken(env.LOCALSPACE_MCP_TOKEN) ?? oauth.ownerToken,
     allowedRoots: parseAllowedRoots(env.LOCALSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.LOCALSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
