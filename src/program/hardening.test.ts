@@ -204,3 +204,39 @@ console.log("hardening.test.ts: all ok");
   assert.deepEqual(r.value, { a: "A", b: "B" });
   console.log("parallel calls keep separate output: ok");
 }
+
+// Call time is free: a 1.4s call does not consume the 1s request window.
+{
+  const r = await run(
+    `const out = await this.call("sleep 1.4; echo OK", "p".repeat(40));
+     return out.stdout.trim();`,
+    { budget: 1000 },
+  );
+  assert.equal(r.status, "done", JSON.stringify(r));
+  assert.equal(r.value, "OK");
+  console.log("call time excluded from request window: ok");
+}
+
+// A call without planB gets a 1s window; unpark still delivers the real result.
+{
+  const table = new ParkTable(60_000);
+  const first = await run(`return await this.call("echo EARLY; sleep 1.3; echo LATE");`, {
+    budget: 60_000,
+    parkTable: table,
+  });
+  assert.equal(first.parked?.kind, "yield");
+  const payload = first.parked!.payload as { planB?: string; budgetMs: number; delta: { stdout: string } };
+  assert.equal(payload.planB, undefined);
+  assert.equal(payload.budgetMs, 1000);
+  assert.match(payload.delta.stdout, /EARLY/);
+  await sleep(600);
+  const resumed = await run(`return await this.unpark(${JSON.stringify(first.parked!.handle)});`, {
+    budget: 60_000,
+    parkTable: table,
+  });
+  assert.equal(resumed.status, "done", JSON.stringify(resumed));
+  const v = resumed.value as { exitCode: number; stdout: string };
+  assert.equal(v.exitCode, 0);
+  assert.match(v.stdout, /LATE/);
+  console.log("planB-less call yields at 1s and keeps output: ok");
+}

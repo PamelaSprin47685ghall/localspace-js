@@ -42,8 +42,6 @@ export interface ServerConfig {
   audit: AuditLogConfig;
   concurrency: ToolConcurrencyConfig;
   parkTtlMs: number;
-  /** Hard cap on one `js` request; on expiry the program keeps running and the reply is a yield park. */
-  yieldBudgetMs: number;
   configDir: string;
 }
 
@@ -316,7 +314,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     stateDir,
     configDir: resolve(expandHomePath(env.LOCALSPACE_CONFIG_DIR ?? join(homedir(), ".localspace"))),
     parkTtlMs: parsePositiveInteger(env.LOCALSPACE_PARK_TTL_MS, 1_800_000, "LOCALSPACE_PARK_TTL_MS"),
-    yieldBudgetMs: parsePositiveInteger(env.LOCALSPACE_YIELD_BUDGET_MS, 20_000, "LOCALSPACE_YIELD_BUDGET_MS"),
     worktreeRoot: resolve(expandHomePath(env.LOCALSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     skillsEnabled: env.LOCALSPACE_SKILLS === undefined ? true : parseBoolean(env.LOCALSPACE_SKILLS),
     skillPaths: parsePathList(env.LOCALSPACE_SKILL_PATHS),

@@ -17,13 +17,13 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
   - \`this.search\` 由内置的 Semble（经 \`uvx\` 启动）提供：传函数名/行为描述，返回 \`{ query, results: [{ file_path, start_line, end_line, score, content? }] }\`。\`opts\` 可为 \`{ topK, maxSnippetLines, content }\`；首次调用要下载依赖并建索引，可能超过一个等待窗口——到点照常 yield，\`this.unpark(handle)\` 继续等即可，不要重发查询。
   - \`this.findRelated(file, line, opts?)\` 在同一次索引里找相似代码（找实现、调用方、同类测试），\`file\` 用搜索结果里的路径。
 - 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
-- 执行：\`this.call(command, planB)\`。\`planB\` 必填，是不跑该命令时的替代方案；它的 UTF-8 字节数 × 50ms 是这条命令的 yield 时限。缺 planB 以 CALL_COMMAND_UNSUPPORTED 失败。
+- 执行：\`this.call(command, planB?)\`。\`planB\` 可选，是不跑该命令时的替代方案；给了就以它的 UTF-8 字节数 × 50ms 为这条命令的 yield 时限，省略则获得 1 秒固定窗口。
   - \`this.signal(sig)\` 与 \`this.send(input)\` 作用在让这次程序 park 的那条 call 上。没有这样一条仍在跑的命令时是 CALL_CHILD_UNKNOWN。
   - 自动 park 的载荷带 \`delta: { stdout, stderr }\`：自上次 park 以来的新输出；命令最终结果仍在 \`CallResult\` 里，不会因为 yield 丢失。
 - 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
 - 恢复：\`this.unpark(handle, arg)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段。yield 现场的 \`arg\` 不注入命令结果；where/confirm/park 现场才用 \`arg\` 续跑。
 
-时间有两道闸：每次 \`js\` 请求本身有等待窗口（默认 20 秒，\`LOCALSPACE_YIELD_BUDGET_MS\`），到点一定返回 yield park，程序在后台继续跑；\`this.call\` 另有 \`planB\` 买的时限（每 20 字节换 1 秒）。看到 yield park 就 \`this.unpark(handle)\` 继续等——命令没死，输出也没丢；不要因为一次 park 就重跑命令。
+时间有两道闸：每次 \`js\` 请求最多 1 秒（不含 \`this.call\` 的等待时间；call 执行多久都不占用这 1 秒），到点一定返回 yield park，程序在后台继续跑；\`this.call\` 自身另有窗口——省略 \`planB\` 时 1 秒，给了 \`planB\` 则每 20 字节换 1 秒。看到 yield park 就 \`this.unpark(handle)\` 继续等——命令没死，输出也没丢；不要因为一次 park 就重跑命令。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
 
@@ -37,7 +37,7 @@ git 没有专用工具。需要时 \`this.call("git status")\` 等。输出在 J
 
 ## 定位与编辑
 
-用 \`this.where\` / \`this.whereAll\` 做字面定位（空白按原文匹配，不折叠），再切片重组后 \`this.write\`。零个或多个匹配时程序会 park，并带上 candidates / nearest——读 payload，选对的 span，\`this.unpark\` 注入即可。
+用 \`this.where\` / \`this.whereAll\` 做字面定位（空白按原文匹配，不折叠），再切片重组后 \`this.write\`。零个或多个匹配时程序会 park，并带上 candidates——读 payload，选对的 span，\`this.unpark\` 注入即可。
 
 ## 防呆
 
@@ -70,5 +70,5 @@ export const API_BRIEF = `js 程序原语均为 this 成员（万象术风格）
 this.cat(path) this.stat(path) this.ls(path) this.where(text,needle) this.whereAll(text,needle) [字面匹配]
 this.search(query[,{topK,maxSnippetLines,content}]) this.findRelated(file,line[,opts]) [Semble 语义索引，repo=当前工作区；依赖 uvx]
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
-this.call(command,planB) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
-call 只收命令字符串，planB 必填；时限 = planB 字节数 × 50ms，到期 yield park 带 delta；每次 js 请求另有 20s 等待窗口，yield 后用 this.unpark(handle) 继续，不重跑命令；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;
+this.call(command,planB?) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg) this.abandon(handle)
+call 只收命令字符串；planB 可选，省略时命令窗口 1s，给了则为字节数 × 50ms；到期 yield park 带 delta；每次 js 最多 1s（call 等待不计入），yield 后用 this.unpark(handle) 继续，不重跑命令；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;

@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { ParkTable } from "./park.js";
 import { runProgram } from "./runner.js";
 import { analyzeCommandDanger, assertInsideRoots, assertNotAuthFile } from "./guard.js";
-import { whereAll, nearestLine } from "./where.js";
+import { whereAll } from "./where.js";
 import { PAIR_HINT_SEPARATOR, composePairHints, appendPairHints } from "./pair-hint.js";
 import { ProgramError } from "./errors.js";
 
@@ -59,16 +59,16 @@ async function run(program: string) {
 {
   const result = await run(`
     const text = await this.cat("README.md");
-    const span = await this.where(text, "## Missing Heading");
+    const span = await this.where(text, "l");
     return span;
   `);
   assert.equal(result.status, "parked");
   assert.equal(result.parked?.kind, "where");
   const handle = result.parked!.handle;
-  const payload = result.parked!.payload as { nearest: { span: [number, number] } | null };
-  assert.ok(payload.nearest);
+  const payload = result.parked!.payload as { candidates: { span: [number, number] }[] };
+  assert.ok(payload.candidates.length > 1);
   const resumed = await run(`
-    return await this.unpark(${JSON.stringify(handle)}, ${JSON.stringify(payload.nearest!.span)});
+    return await this.unpark(${JSON.stringify(handle)}, ${JSON.stringify(payload.candidates[0]!.span)});
   `);
   assert.equal(resumed.status, "done");
   console.log("this.where-park + this.unpark: ok");
@@ -114,8 +114,7 @@ async function run(program: string) {
   // 字面匹配：空白不折叠
   assert.equal(whereAll("aa  bb", "aa bb").length, 0);
   assert.equal(whereAll("aa  bb", "aa  bb").length, 1);
-  assert.ok(nearestLine("one\ntwo\nthree", "too"));
-  console.log("whereAll/nearest: ok");
+  console.log("whereAll: ok");
 }
 
 {

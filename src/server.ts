@@ -115,8 +115,8 @@ function createMcpServer(
     {
       instructions:
         "使用 open_workspace 打开目录，然后用 js 运行平铺的异步 JavaScript 程序。" +
-        "全部原语均为 this 成员：this.cat/stat/ls/rg/where/write/mkdir/mv/rm/call/signal/send/park，" +
-        "以及 this.unpark(handle,arg)/this.abandon(handle)。this.call(command, planB) 必填 planB。" +
+        "全部原语均为 this 成员：this.cat/stat/ls/search/findRelated/where/whereAll/write/mkdir/mv/rm/call/signal/send/park，" +
+        "以及 this.unpark(handle,arg)/this.abandon(handle)。this.call(command, planB?)：省略 planB 时命令有 1 秒窗口；每次 js 最多 1 秒（call 等待不计入）。" +
         "where 为字面匹配；危险操作与 where 歧义会 park。互不相干的任务可并行调用 js。" +
         "工具结果中 NUL+BOM 之后是 Host Pair Hint。",
     },

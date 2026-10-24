@@ -18,7 +18,7 @@ export type WorkerToMain =
   | { t: "park"; id: number; kind: "yield" | "where" | "park" | "confirm"; payload: unknown; written: string[] }
   | { t: "unpark"; id: number; handle: string; value: unknown }
   | { t: "abandon"; id: number; handle: string }
-  | { t: "call"; id: number; command: string; planB: string; opts: CallOpts }
+  | { t: "call"; id: number; command: string; planB?: string; opts: CallOpts }
   | { t: "semble"; id: number; tool: SembleTool; args: Record<string, unknown> }
   | { t: "signal"; id: number; signal?: string }
   | { t: "send"; id: number; input: string }

@@ -16,7 +16,7 @@ import {
   isLocalspaceStatePath,
   type DangerHit,
 } from "./guard.js";
-import { nearestLine, whereAll, whereCandidates } from "./where.js";
+import { whereAll, whereCandidates } from "./where.js";
 import type { CallOpts, CallResult } from "./call.js";
 import type { SembleContent, SembleTool } from "./semble.js";
 
@@ -29,7 +29,7 @@ export interface ApiContext {
   written: string[];
   /** Pause the program until a later this.unpark(handle, value) (worker-side park). */
   requestPark: (kind: "where" | "park" | "confirm", payload: unknown) => Promise<unknown>;
-  runCall: (command: string, planB: string, opts: CallOpts) => Promise<CallResult>;
+  runCall: (command: string, planB: string | undefined, opts: CallOpts) => Promise<CallResult>;
   signalParked: (signal?: string) => Promise<void>;
   sendParked: (input: string) => Promise<void>;
   /** Built-in Semble search; `repo` is always bound to this workspace root by the main thread. */
@@ -113,12 +113,12 @@ export function createProgramApi(ctx: ApiContext) {
     if (rootHit) await requireDanger(rootHit, forceDangerous);
   };
 
-  const runCall = async (command: string, planB: string, opts: CallOpts = {}): Promise<CallResult> => {
+  const runCall = async (command: string, planB: string | undefined, opts: CallOpts = {}): Promise<CallResult> => {
     if (typeof command !== "string" || !command) {
       throw new ProgramError("CALL_COMMAND_UNSUPPORTED", "this.call 需要一条命令字符串。");
     }
-    if (typeof planB !== "string" || !planB) {
-      throw new ProgramError("CALL_COMMAND_UNSUPPORTED", "this.call 必填 planB（不跑该命令时的替代方案）。");
+    if (planB !== undefined && (typeof planB !== "string" || !planB)) {
+      throw new ProgramError("INVALID_ARGUMENT", "planB 必须是非空字符串；省略时这条命令有 1 秒等待窗口。");
     }
     const hit = analyzeCommandDanger(command);
     if (hit) await requireDanger(hit, false);
@@ -186,16 +186,15 @@ export function createProgramApi(ctx: ApiContext) {
     return ctx.runSemble("find_related", { file_path: rel(absolute), line, ...sembleArgs(opts) });
   }
 
-  async function where(content: string, needle: string, from = 0): Promise<[number, number]> {
+  async function where(content: string, needle: string): Promise<[number, number]> {
     if (typeof content !== "string" || typeof needle !== "string") {
       throw new ProgramError("INVALID_ARGUMENT", "where(content, needle) 需要字符串。");
     }
-    const spans = whereAll(content, needle, from);
+    const spans = whereAll(content, needle);
     if (spans.length === 1) return spans[0]!;
     const payload = {
       needle,
       candidates: whereCandidates(content, spans),
-      nearest: spans.length === 0 ? nearestLine(content, needle) : null,
     };
     const injected = await ctx.requestPark("where", payload);
     if (
@@ -270,7 +269,7 @@ export function createProgramApi(ctx: ApiContext) {
     noteWrite(absolute);
   }
 
-  async function call(command: string, planB: string): Promise<CallResult> {
+  async function call(command: string, planB?: string): Promise<CallResult> {
     return runCall(command, planB, {});
   }
 

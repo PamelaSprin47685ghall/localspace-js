@@ -22,6 +22,11 @@ export interface RunProgramInput {
 
 export type RunProgramResult = ParkResumeResult;
 
+/** One `js` request may run this long outside `this.call`; call time is free. */
+export const REQUEST_WINDOW_MS = 1000;
+/** A `this.call` without planB gets exactly this long before it yields. */
+export const CALL_WINDOW_MS = 1000;
+
 const FROM_SOURCE = import.meta.url.endsWith(".ts");
 const WORKER_URL = new URL(FROM_SOURCE ? "./worker.ts" : "./worker.js", import.meta.url);
 /** From source (tests/dev under tsx) the worker entry must register tsx before loading worker.ts. */
@@ -42,8 +47,9 @@ export function liveProgramCount(): number {
 
 /**
  * Run a program in its own worker thread. The main thread only brokers messages and keeps time:
- * after `yieldBudgetMs` (bought with planB bytes) the request returns a yield park no matter what the program is doing
- * (busy loop, never-resolving promise, long call).
+ * once the request window (REQUEST_WINDOW_MS of program time, excluding `this.call` waits) is
+ * spent, the request returns a yield park no matter what the program is doing (busy loop,
+ * never-resolving promise). `yieldBudgetMs` exists for tests that need a wider window.
  */
 export async function runProgram(input: RunProgramInput): Promise<RunProgramResult> {
   const run = new ProgramRun(input, input.parkTable ?? globalParkTable);
@@ -70,6 +76,12 @@ class ProgramRun {
   private dead = false;
   private planB?: string;
   private budgetMs?: number;
+  /** Window bookkeeping: call time is excluded from the request window. */
+  private windowStartedAt = Date.now();
+  private callWaitMs = 0;
+  private callActive = 0;
+  private callStartedAt?: number;
+  private windowTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly input: RunProgramInput,
@@ -97,7 +109,7 @@ class ProgramRun {
     this.worker.on("error", (error: Error) => this.kill(endWith("failed", "WORKER_CRASHED", `程序线程崩溃：${error.message}`)));
     this.worker.on("exit", (code) => this.kill(endWith("failed", "WORKER_EXITED", `程序线程退出（code ${code}）。`)));
     this.planB = input.planB;
-    this.budgetMs = input.yieldBudgetMs;
+    this.budgetMs = input.yieldBudgetMs ?? REQUEST_WINDOW_MS;
     live.add(this);
   }
 
@@ -124,6 +136,7 @@ class ProgramRun {
   kill(end: ProgramEnd): void {
     if (this.dead) return;
     this.dead = true;
+    this.clearWindowTimer();
     live.delete(this);
     this.hub.dispose();
     void this.worker.terminate();
@@ -134,17 +147,61 @@ class ProgramRun {
     const queued = this.events.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => {
-      const budgetMs = this.budgetMs;
-      const timer = budgetMs === undefined ? undefined : setTimeout(() => {
-        this.wake = undefined;
-        resolve(undefined);
-      }, budgetMs);
       this.wake = () => {
-        clearTimeout(timer);
+        this.clearWindowTimer();
         this.wake = undefined;
         resolve(this.events.shift());
       };
+      this.armWindow();
     });
+  }
+
+  private remainingWindowMs(): number {
+    const now = Date.now();
+    const countedUntil = this.callActive > 0 ? (this.callStartedAt ?? now) : now;
+    return (this.budgetMs ?? REQUEST_WINDOW_MS) - (countedUntil - this.windowStartedAt - this.callWaitMs);
+  }
+
+  /** Arm the window timer unless a call is in flight (call time is free). */
+  private armWindow(): void {
+    this.clearWindowTimer();
+    if (!this.wake || this.callActive > 0) return;
+    this.windowTimer = setTimeout(() => {
+      this.windowTimer = undefined;
+      this.wake?.();
+    }, Math.max(0, this.remainingWindowMs()));
+  }
+
+  private clearWindowTimer(): void {
+    if (this.windowTimer !== undefined) {
+      clearTimeout(this.windowTimer);
+      this.windowTimer = undefined;
+    }
+  }
+
+  private beginCall(): void {
+    if (this.callActive === 0) this.callStartedAt = Date.now();
+    this.callActive += 1;
+    this.clearWindowTimer();
+  }
+
+  private endCall(): void {
+    if (this.callActive === 0) return;
+    this.callActive -= 1;
+    if (this.callActive === 0) {
+      this.callWaitMs += Date.now() - (this.callStartedAt ?? Date.now());
+      this.callStartedAt = undefined;
+      this.armWindow();
+    }
+  }
+
+  /** A resumed program gets a fresh window; calls still running stay free. */
+  private resetWindow(): void {
+    const now = Date.now();
+    this.windowStartedAt = now;
+    this.callWaitMs = 0;
+    if (this.callActive > 0) this.callStartedAt = now;
+    this.armWindow();
   }
 
   private push(event: Event): void {
@@ -159,7 +216,8 @@ class ProgramRun {
       kind,
       payload,
       async (value, budgetMs) => {
-        this.budgetMs = budgetMs;
+        this.budgetMs = budgetMs ?? REQUEST_WINDOW_MS;
+        this.resetWindow();
         // A yield never injects the client's argument as the call result: the command keeps
         // running and the worker receives its real CallResult when it exits. Only explicit
         // parks (where/confirm/park) resume by handing `value` back to the program.
@@ -223,8 +281,11 @@ class ProgramRun {
     }
     if (msg.t === "call") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
-      const budgetMs = Buffer.byteLength(msg.planB, "utf8") * 50;
+      const planB = msg.planB;
+      const budgetMs = planB === undefined ? CALL_WINDOW_MS : Buffer.byteLength(planB, "utf8") * 50;
       const call = this.hub.call(msg.command, msg.opts);
+      this.beginCall();
+      void call.then(() => this.endCall(), () => this.endCall());
       const expired = Promise.withResolvers<"yield">();
       const timer = setTimeout(() => expired.resolve("yield"), budgetMs);
       timer.unref();
@@ -247,8 +308,11 @@ class ProgramRun {
         id: msg.id,
         kind: "yield",
         payload: {
-          message: "planB 买的时间用完了，命令仍在后台运行。this.unpark(handle) 继续等它结束；不会丢失输出。",
-          planB: msg.planB,
+          message:
+            planB === undefined
+              ? "this.call 的 1 秒等待窗口用完了，命令仍在后台运行。this.unpark(handle) 继续等它结束；不会丢失输出。"
+              : "planB 买的时间用完了，命令仍在后台运行。this.unpark(handle) 继续等它结束；不会丢失输出。",
+          ...(planB === undefined ? {} : { planB }),
           budgetMs,
           delta,
         },

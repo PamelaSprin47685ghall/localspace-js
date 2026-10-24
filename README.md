@@ -17,12 +17,12 @@
 |---|---|
 | `this.cat` / `this.stat` / `this.ls` | 读文件与目录 |
 | `this.search` / `this.findRelated` | 语义代码搜索（内置 [Semble](https://github.com/MinishLab/semble)，经 `uvx` 启动） |
-| `this.where` / `this.whereAll` | 空白折叠精确定位；零/多匹配会 park |
+| `this.where` / `this.whereAll` | 字面精确定位；`where` 零/多匹配会 park |
 | `this.write` / `this.mkdir` / `this.mv` / `this.rm` | 立即落盘（as-is） |
-| `this.call(command, planB)` | 执行 shell |
+| `this.call(command, planB?)` | 执行 shell；省略 `planB` 时命令有 1 秒窗口 |
 | `this.park` / `this.unpark` / `this.abandon` | 挂起与恢复（在**新** program 里调用 unpark/abandon） |
 
-- 约每 **30 秒**自动 `yield` park，用 `this.unpark(handle)` 续跑
+- 每次 `js` 最多运行 **1 秒**（`this.call` 的等待时间不计入）；到点自动 `yield` park，用 `this.unpark(handle)` 续跑
 - 程序运行在独立 worker 线程：主线程只做 HTTP/MCP 与计时，死循环也会按时 yield，不会卡住服务
 - 每个 `this.call` 独占进程组；程序结束、`this.abandon`、现场过期（`LOCALSPACE_PARK_TTL_MS`，默认 30 分钟）、请求取消或服务关闭时整组 SIGTERM→SIGKILL
 - 输出每路仅保留末尾 128KiB（`truncatedBytes` 标明丢弃量）；`this.cat` 上限 8MiB；返回值上限 1MiB；MCP 请求体上限 8MB
@@ -31,17 +31,14 @@
 - 硬性拒绝：路径越出 `allowedRoots`、改写 `auth.json`
 - 工具结果在 `\u0000\uFEFF`（NUL+BOM）之后附带 Pair Hint（git 脏度、park 现场等）
 
-### `this.call` 形态
+### `this.call`
 
 ```js
-await this.call("npm test");
-await this.call({ spawn: "node server.js", name: "srv" });
-await this.call({ send: { name: "srv", input: "ping" } });
-await this.call({ waitFor: { port: 3000, timeoutMs: 10000 } });
-const snap = await this.call({ read: { name: "srv", waitMs: 500 } });
-await this.call({ signal: "SIGTERM", name: "srv" });
-await this.call({ join: { name: "srv", timeoutMs: 5000 } });
+const out = await this.call("npm test");            // 缺省 1 秒窗口
+await this.call("npm test", "跳过测试并报告风险");   // planB 字节数 × 50ms
 ```
+
+命令到期未结束就 `yield` park；输出在 `delta` 里，命令继续在后台跑，`this.unpark(handle)` 拿到最终 `CallResult`，不要重跑。
 
 ## 代码搜索依赖 `uvx`
 
