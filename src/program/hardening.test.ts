@@ -29,9 +29,9 @@ async function waitGone(pgid: number, ms = 4000) {
   return !groupAlive(pgid);
 }
 
-function run(program: string, opts: { budget?: number; parkTable?: ParkTable; signal?: AbortSignal } = {}) {
+function run(program: string, opts: { budget?: number; parkTable?: ParkTable; signal?: AbortSignal; workspaceId?: string } = {}) {
   return runProgram({
-    workspaceId: "ws_hard",
+    workspaceId: opts.workspaceId ?? "ws_hard",
     root,
     allowedRoots: [root],
     configDir,
@@ -63,9 +63,13 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
   assert.ok(Date.now() - started < 3000);
   assert.ok(ticks >= 10, `main loop ticked only ${ticks} times`);
   // resuming a still-busy program yields again at the next budget instead of hanging
-  const again = await table.take(parked.parked!.handle)!.resume(undefined, 1000);
+  const busySite = table.take(parked.parked!.handle);
+  assert.equal(busySite.status, "ok");
+  const again = await (busySite as { site: { resume: (v: unknown, ms?: number) => Promise<{ parked?: { kind: string; handle: string } }> } }).site.resume(undefined, 1000);
   assert.equal(again.parked?.kind, "yield");
-  await table.take(again.parked!.handle)!.abandon();
+  const againSite = table.take(again.parked!.handle);
+  assert.equal(againSite.status, "ok");
+  await (againSite as { site: { abandon: () => Promise<void> } }).site.abandon();
   await sleep(100);
   assert.equal(liveProgramCount(), 0);
   console.log("while(true) isolated + abandon: ok");
@@ -293,4 +297,20 @@ console.log("hardening.test.ts: all ok");
   assert.equal(after.status, "done");
   await run(`return await this.abandon(${JSON.stringify(first.parked!.handle)});`, { budget: 60_000, parkTable: table });
   console.log("non-string planB fails cleanly: ok");
+}
+
+// A handle from another workspace is rejected without being consumed.
+{
+  const table = new ParkTable(60_000);
+  const first = await run(`return await this.call("sleep 30", "x");`, { budget: 60_000, parkTable: table, workspaceId: "ws_a" });
+  const handle = first.parked!.handle;
+  const stray = await run(`return await this.unpark(${JSON.stringify(handle)});`, { budget: 60_000, parkTable: table, workspaceId: "ws_b" });
+  assert.equal(stray.status, "failed", JSON.stringify(stray));
+  assert.equal(stray.error?.code, "PARK_NOT_FOUND");
+  assert.ok(!/其他|另一个|别的工作区|other/i.test(stray.error?.message ?? ""), stray.error?.message);
+  assert.equal(table.list("ws_a").length, 1, "the mismatched unpark consumed the site");
+  const own = await run(`return await this.abandon(${JSON.stringify(handle)});`, { budget: 60_000, parkTable: table, workspaceId: "ws_a" });
+  assert.equal(own.status, "done", JSON.stringify(own));
+  assert.equal(table.size, 0);
+  console.log("park handles are workspace-scoped: ok");
 }

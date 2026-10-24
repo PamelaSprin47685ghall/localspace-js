@@ -330,11 +330,16 @@ class ProgramRun {
         this.endCall();
       }
     }
-    const site = this.parkTable.take(msg.handle);
-    if (!site) return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}` } };
-    if (site.workspaceId !== this.input.workspaceId) {
-      return { error: { code: "PARK_WORKSPACE_MISMATCH", message: "挂起现场不属于当前工作区。" } };
+    const taken = this.parkTable.take(msg.handle, this.input.workspaceId);
+    if (taken.status === "not_found") {
+      return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}（已过期或已处理）。` } };
     }
+    if (taken.status === "mismatch") {
+      // Never reveal that another workspace holds this handle: separate agents run in separate
+      // workspaces, and the caller has no business knowing about them. The site stays untouched.
+      return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}（已过期或已处理）。` } };
+    }
+    const site = taken.site;
     if (msg.t === "abandon") {
       await site.abandon();
       return {};

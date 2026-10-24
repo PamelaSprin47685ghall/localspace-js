@@ -39,6 +39,12 @@ export interface ParkSiteView {
   progress?: ParkSite["progress"];
 }
 
+/** Result of claiming a handle: a mismatched workspace never consumes the site. */
+export type ParkTake =
+  | { status: "ok"; site: ParkSite }
+  | { status: "not_found" }
+  | { status: "mismatch" };
+
 export class ParkTable {
   private readonly sites = new Map<string, ParkSite>();
   private sweeper?: NodeJS.Timeout;
@@ -84,11 +90,16 @@ export class ParkTable {
     return site;
   }
 
-  take(handle: string): ParkSite | undefined {
+  /**
+   * Claim a handle for one workspace. A handle from another workspace is reported as a
+   * mismatch and left untouched: a stray unpark must not consume someone else's live program.
+   */
+  take(handle: string, workspaceId?: string): ParkTake {
     const site = this.get(handle);
-    if (!site) return undefined;
+    if (!site) return { status: "not_found" };
+    if (workspaceId !== undefined && site.workspaceId !== workspaceId) return { status: "mismatch" };
     this.sites.delete(handle);
-    return site;
+    return { status: "ok", site };
   }
 
   list(workspaceId?: string): ParkSiteView[] {
