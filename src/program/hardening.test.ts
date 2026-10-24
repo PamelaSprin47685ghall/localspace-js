@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ParkTable } from "./park.js";
 import { RequestWindow } from "./request-window.js";
-import { RequestWindow } from "./request-window.js";
 import { liveProgramCount, runProgram, shutdownPrograms } from "./runner.js";
 import { STREAM_CAP, TailBuffer } from "./call.js";
 import { CAT_MAX_BYTES } from "./api.js";
