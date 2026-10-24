@@ -47,7 +47,7 @@ const surface = createProgramApi({
   ...init.ctx,
   written,
   requestPark: (kind, payload) => ask((id) => ({ t: "park", id, kind, payload, written: [...written] })),
-  runCall: (command, planB, opts) => ask((id) => ({ t: "call", id, command, planB, opts })) as Promise<CallResult>,
+  runCall: (command, opts) => ask((id) => ({ t: "call", id, command, opts })) as Promise<CallResult>,
   signalParked: (signal) => ask((id) => ({ t: "signal", id, signal })) as Promise<void>,
   sendParked: (input) => ask((id) => ({ t: "send", id, input })) as Promise<void>,
   runSemble: (tool, args) => ask((id) => ({ t: "semble", id, tool, args })),
@@ -56,8 +56,13 @@ const surface = createProgramApi({
 // 万象术风格：全部原语挂在 this 上（this.cat / this.call / this.unpark …）
 const api = {
   ...surface,
-  unpark: (handle: string, value?: unknown, planB?: string) =>
-    ask((id) => ({ t: "unpark", id, handle, value, planB })),
+  unpark(handle: string, value?: unknown) {
+    if (arguments.length < 1 || arguments.length > 2)
+      throw new ProgramError("INVALID_ARGUMENT", "unpark(handle, value?) 最多接受两个参数；等待预算来自 js 工具顶层 planB。");
+    if (typeof handle !== "string" || !handle)
+      throw new ProgramError("INVALID_ARGUMENT", "unpark 的 handle 必须是非空字符串。");
+    return ask(id => ({ t: "unpark", id, handle, value }));
+  },
   abandon: async (handle: string) => {
     await ask((id) => ({ t: "abandon", id, handle }));
   },

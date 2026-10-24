@@ -10,6 +10,8 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { liveProgramCount } from "./program/runner.js";
+import { globalParkTable } from "./program/park.js";
+const TEST_PLAN = "Wait for the physical server test to complete and preserve its actual result.";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
 
 const root = mkdtempSync(join(tmpdir(), "localspace-srv-"));
@@ -99,7 +101,7 @@ function rpc(method: string, params: Record<string, unknown>, opts: { modern?: b
   const opened = await rpc("tools/call", { name: "open_workspace", arguments: { path: join(root, "proj") } }, { modern: true, name: "open_workspace" });
   assert.equal(opened.status, 200);
   const wid = ((await opened.json()) as { result: { structuredContent: { workspaceId: string } } }).result.structuredContent.workspaceId;
-  const called = await rpc("tools/call", { name: "js", arguments: { workspaceId: wid, program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
+  const called = await rpc("tools/call", { name: "js", arguments: { planB: TEST_PLAN, workspaceId: wid, program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
   assert.equal(called.status, 200);
   const res = ((await called.json()) as { result: { content: { text: string }[]; structuredContent: { value: number } } }).result;
   assert.equal(res.structuredContent.value, 42);
@@ -109,14 +111,14 @@ function rpc(method: string, params: Record<string, unknown>, opts: { modern?: b
   assert.ok(sep > 0 && t.slice(0, sep).startsWith("status: done"), "body first");
 
   // workspaceId is optional: the most recent workspace is reused.
-  const omitted = await rpc("tools/call", { name: "js", arguments: { program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
+  const omitted = await rpc("tools/call", { name: "js", arguments: { planB: TEST_PLAN, program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
   // Raw JSON-RPC response; shape is asserted by the test itself.
   const omittedBody = (await omitted.json()) as { result: { structuredContent: { value: number } } };
   const omittedResult = omittedBody.result;
   assert.equal(omittedResult.structuredContent.value, 42);
 
   // A lost/corrupted id fails with candidates and a recovery instruction, not a dead end.
-  const bogus = await rpc("tools/call", { name: "js", arguments: { workspaceId: "ws_000000000000", program: "return 1" } }, { modern: true, name: "js" });
+  const bogus = await rpc("tools/call", { name: "js", arguments: { planB: TEST_PLAN, workspaceId: "ws_000000000000", program: "return 1" } }, { modern: true, name: "js" });
   const bogusBody = (await bogus.json()) as { result: { content: { text: string }[]; isError?: boolean } };
   const bogusResult = bogusBody.result;
   assert.equal(bogusResult.isError, true);
@@ -148,35 +150,32 @@ assert.ok(workspaceId, text(opened));
 {
   const m = await client(true);
   assert.equal(m.getProtocolEra(), "modern");
-  const r = await m.callTool({ name: "js", arguments: { workspaceId, program: `return 1 + 1; // ${"pad".repeat(200)}` } });
+  const r = await m.callTool({ name: "js", arguments: { planB: TEST_PLAN, workspaceId, program: `return 1 + 1; // ${"pad".repeat(200)}` } });
   assert.equal(structured(r).value, 2, text(r));
   await m.close();
   assert.equal(a.getProtocolEra(), "legacy");
   console.log("SDK client modern + legacy eras: ok");
 }
 
-// Client disconnect aborts the program and kills its process group, on both eras.
-const groupAlive = (pgid: number) => {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+// Client disconnect keeps the program alive and leaves a claimable park, on both eras.
 for (const modern of [false, true]) {
-  const pidFile = join(root, "proj", "pid.txt");
-  writeFileSync(pidFile, "");
   const ac = new AbortController();
   const program = `await new Promise(() => {});`;
-  const pending = rpc("tools/call", { name: "js", arguments: { workspaceId, program } }, { modern, name: "js", signal: ac.signal }).catch(() => undefined);
+  const pending = rpc("tools/call", { name: "js", arguments: { planB: TEST_PLAN, workspaceId, program } }, { modern, name: "js", signal: ac.signal }).catch(() => undefined);
   await sleep(100);
   assert.equal(liveProgramCount(), 1);
   ac.abort();
   await pending;
+  await sleep(200);
+  assert.equal(liveProgramCount(), 1, "a disconnected program must keep running");
+  const parked = globalParkTable.list(workspaceId);
+  assert.ok(parked.length >= 1, "a disconnected program must leave a claimable park");
+  const taken = globalParkTable.take(parked[parked.length - 1]!.handle, workspaceId);
+  assert.equal(taken.status, "ok");
+  await (taken as { site: { abandon: () => Promise<void> } }).site.abandon();
   for (let i = 0; i < 80 && liveProgramCount(); i++) await sleep(50);
   assert.equal(liveProgramCount(), 0);
-  console.log(`${modern ? "2026-07-28" : "2025-era"} client disconnect kills program + group: ok`);
+  console.log(`${modern ? "2026-07-28" : "2025-era"} client disconnect keeps program + park: ok`);
 }
 
 // A long-running call parks on its planB budget; healthz and another tool call stay fast.
@@ -184,7 +183,7 @@ const busyStarted = Date.now();
 const sleepCommand = 'node -e "process.stdin.resume()"';
 const busy = a.callTool({
   name: "js",
-  arguments: { workspaceId, program: `await this.call(${JSON.stringify(sleepCommand)}, "planB");` },
+  arguments: { planB: "planB", workspaceId, program: `await this.call(${JSON.stringify(sleepCommand)});` },
 });
 await sleep(200);
 const hz = Date.now();
@@ -193,7 +192,7 @@ assert.ok(Date.now() - hz < 500, "healthz blocked");
 assert.equal(health.livePrograms, 1);
 const b = await client(true);
 const quickStarted = Date.now();
-const quick = await b.callTool({ name: "js", arguments: { workspaceId, program: `return 6 * 7; // ${"pad".repeat(300)}` } });
+const quick = await b.callTool({ name: "js", arguments: { planB: TEST_PLAN, workspaceId, program: `return 6 * 7; // ${"pad".repeat(300)}` } });
 assert.ok(Date.now() - quickStarted < 1500, `second call took ${Date.now() - quickStarted}ms`);
 assert.equal(structured(quick).value, 42);
 const parked = structured(await busy);
@@ -201,7 +200,7 @@ assert.equal(parked.status, "parked");
 assert.equal((parked.parked as { kind: string }).kind, "yield");
 assert.ok(Date.now() - busyStarted < 4000);
 const handle = (parked.parked as { handle: string }).handle;
-const gone = await b.callTool({ name: "js", arguments: { workspaceId, program: `await this.abandon(${JSON.stringify(handle)}); return "ok"; // ${"pad".repeat(200)}` } });
+const gone = await b.callTool({ name: "js", arguments: { planB: TEST_PLAN, workspaceId, program: `await this.abandon(${JSON.stringify(handle)}); return "ok"; // ${"pad".repeat(200)}` } });
 assert.equal(structured(gone).value, "ok", text(gone));
 await sleep(100);
 assert.equal(liveProgramCount(), 0);
@@ -209,7 +208,7 @@ console.log("long call parks without blocking HTTP/MCP: ok");
 
 // A program body over express's old 100kb default is accepted.
 const bigProgram = `const s = ${JSON.stringify("x".repeat(300_000))}; return s.length;`;
-const big = await b.callTool({ name: "js", arguments: { workspaceId, program: bigProgram } });
+const big = await b.callTool({ name: "js", arguments: { planB: TEST_PLAN, workspaceId, program: bigProgram } });
 assert.equal(structured(big).value, 300_000, text(big));
 console.log("300KB request body accepted: ok");
 

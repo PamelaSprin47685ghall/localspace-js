@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RequestWindow } from "./request-window.js";
 
 export type ParkKind = "yield" | "where" | "park" | "confirm";
 
@@ -10,8 +11,8 @@ export interface ParkSite {
   createdAt: number;
   expiresAt: number;
   elapsedMs: number;
-  /** budgetMs: how long the resuming request is willing to wait on a call (its own planB, else 1s). */
-  resume: (value: unknown, budgetMs?: number) => Promise<ParkResumeResult>;
+  /** 恢复目标借用控制请求已有的绝对期限。 */
+  resume: (value: unknown, window: RequestWindow) => Promise<ParkResumeResult>;
   abandon: () => Promise<void>;
   progress?: {
     phase: string;
@@ -39,7 +40,7 @@ export interface ParkSiteView {
   progress?: ParkSite["progress"];
 }
 
-/** Result of claiming a handle: a mismatched workspace never consumes the site. */
+/** 工作区不匹配不得消费其他程序的现场。 */
 export type ParkTake =
   | { status: "ok"; site: ParkSite }
   | { status: "not_found" }
@@ -90,10 +91,6 @@ export class ParkTable {
     return site;
   }
 
-  /**
-   * Claim a handle for one workspace. A handle from another workspace is reported as a
-   * mismatch and left untouched: a stray unpark must not consume someone else's live program.
-   */
   take(handle: string, workspaceId?: string): ParkTake {
     const site = this.get(handle);
     if (!site) return { status: "not_found" };

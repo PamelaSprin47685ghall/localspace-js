@@ -1,8 +1,9 @@
 import { Worker } from "node:worker_threads";
 import { CallHub } from "./call.js";
-import { isProgramError } from "./errors.js";
+import { ProgramError, isProgramError } from "./errors.js";
 import { sembleRequest } from "./semble.js";
 import { globalParkTable, toView, type ParkKind, type ParkResumeResult, type ParkTable } from "./park.js";
+import { RequestWindow } from "./request-window.js";
 import type { MainToWorker, ProgramEnd, WorkerInit, WorkerToMain } from "./protocol.js";
 
 export interface RunProgramInput {
@@ -12,20 +13,14 @@ export interface RunProgramInput {
   configDir: string;
   stateDir: string;
   program: string;
-  yieldBudgetMs?: number;
-  /** Echoed back in the yield park so the model rereads its own alternative. */
-  planB?: string;
+  /** 必填工具参数；整个请求及其恢复目标共用 UTF-8 字节数 × 50ms。 */
+  planB: string;
   parkTable?: ParkTable;
   /** Aborted when the MCP request is cancelled or its connection drops: the run and its process groups die. */
   signal?: AbortSignal;
 }
 
 export type RunProgramResult = ParkResumeResult;
-
-/** One `js` request may run this long outside `this.call`; call time is free. */
-export const REQUEST_WINDOW_MS = 1000;
-/** A `this.call` without planB gets exactly this long before it yields. */
-export const CALL_WINDOW_MS = 1000;
 
 const FROM_SOURCE = import.meta.url.endsWith(".ts");
 const WORKER_URL = new URL(FROM_SOURCE ? "./worker.ts" : "./worker.js", import.meta.url);
@@ -45,15 +40,16 @@ export function liveProgramCount(): number {
   return live.size;
 }
 
-/**
- * Run a program in its own worker thread. The main thread only brokers messages and keeps time:
- * once the request window (REQUEST_WINDOW_MS of program time, excluding `this.call` waits) is
- * spent, the request returns a yield park no matter what the program is doing (busy loop,
- * never-resolving promise). `yieldBudgetMs` exists for tests that need a wider window.
- */
+/** 独立 worker 执行程序；主线程持有一次准入的绝对截止时间。 */
 export async function runProgram(input: RunProgramInput): Promise<RunProgramResult> {
-  const run = new ProgramRun(input, input.parkTable ?? globalParkTable);
-  const onAbort = () => run.kill(endWith("failed", "CANCELLED", "请求已取消，程序及其进程组已终止。"));
+  if (typeof input.planB !== "string" || input.planB.length === 0) {
+    return { status: "failed", error: { code: "INVALID_ARGUMENT", message: "js 工具顶层 planB 必须是非空字符串；等待时间为 UTF-8 字节数 × 50 ms。" }, written: [] };
+  }
+  if (input.signal?.aborted) return { status: "failed", error: { code: "CANCELLED", message: "请求已取消，程序未启动。" }, written: [] };
+  const window = new RequestWindow(input.planB);
+  const run = new ProgramRun(input, input.parkTable ?? globalParkTable, window);
+  // The client hung up: the program (and its calls) keep running and stay claimable via park.
+  const onAbort = () => run.detach();
   if (input.signal?.aborted) onAbort();
   input.signal?.addEventListener("abort", onAbort, { once: true });
   try {
@@ -74,21 +70,18 @@ class ProgramRun {
   private readonly events: Event[] = [];
   private wake?: () => void;
   private dead = false;
-  private planB?: string;
-  /** Program-time window for this request; call waiting is billed separately. */
-  private budgetMs = REQUEST_WINDOW_MS;
-  /** How long this request is willing to wait on the active call: the call's planB (bytes × 50ms), else 1s. */
-  private callWaitBudgetMs = CALL_WINDOW_MS;
-  /** Window bookkeeping: call time is excluded from the request window. */
-  private windowStartedAt = Date.now();
-  private callWaitMs = 0;
+  private detached = false;
+  private detachedResult?: RunProgramResult;
   private callActive = 0;
-  private callStartedAt?: number;
-  private windowTimer?: NodeJS.Timeout;
+  private stopListening?: () => void;
+  private readonly admissionWaiters = new Set<() => void>();
+  private readonly queuedReplies: Extract<MainToWorker, { t: "reply" }>[] = [];
+  private readonly controls = new Map<number, RequestWindow>();
 
   constructor(
     private readonly input: RunProgramInput,
     private readonly parkTable: ParkTable,
+    private window: RequestWindow,
   ) {
     const init: WorkerInit = {
       program: input.program,
@@ -111,16 +104,17 @@ class ProgramRun {
     this.worker.on("message", (msg: WorkerToMain) => void this.onMessage(msg));
     this.worker.on("error", (error: Error) => this.kill(endWith("failed", "WORKER_CRASHED", `程序线程崩溃：${error.message}`)));
     this.worker.on("exit", (code) => this.kill(endWith("failed", "WORKER_EXITED", `程序线程退出（code ${code}）。`)));
-    this.planB = input.planB;
-    this.budgetMs = input.yieldBudgetMs ?? REQUEST_WINDOW_MS;
     live.add(this);
   }
 
   /** Wait up to this request's windows for the next park/end; otherwise hand back a yield park. */
   async wait(): Promise<RunProgramResult> {
+    if (this.dead && this.events.length === 0) {
+      return { status: "failed", error: { code: "PROGRAM_ENDED", message: "程序已经结束。" }, written: [...this.written] };
+    }
     const event = await this.next();
     if (!event) {
-      return this.yieldPark();
+      return this.detachedResult ?? this.yieldPark();
     }
     if (event.t === "park") {
       this.merge(event.written);
@@ -129,13 +123,32 @@ class ProgramRun {
     return this.finish(event.end);
   }
 
+  /**
+   * The client disconnected. Do not kill anything: leave a claimable park site so a later js
+   * call can unpark this program and collect its result instead of redoing the work.
+   */
+  detach(): void {
+    if (this.dead || this.detached) return;
+    this.detached = true;
+    this.detachWindow();
+    this.detachedResult = this.park("yield", {
+      message:
+        "客户端已断开；程序及其命令仍在后台运行。下一次 js 请求用 this.unpark(handle) 继续等它结束（顶层 planB 决定等多久），不要重跑命令。",
+      elapsedMs: Date.now() - this.startedAt,
+      delta: this.hub.takeDelta(),
+    });
+    this.wake?.();
+  }
+
   /** Terminate the worker and every process group it started. Idempotent. */
   kill(end: ProgramEnd): void {
     if (this.dead) return;
     this.dead = true;
-    this.clearWindowTimer();
+    this.detachWindow();
     live.delete(this);
     this.hub.dispose();
+    this.queuedReplies.length = 0;
+    this.releaseAdmissions();
     void this.worker.terminate();
     this.push({ t: "end", end });
   }
@@ -143,70 +156,55 @@ class ProgramRun {
   private next(): Promise<Event | undefined> {
     const queued = this.events.shift();
     if (queued) return Promise.resolve(queued);
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
       this.wake = () => {
-        this.clearWindowTimer();
+        this.detachWindow();
         this.wake = undefined;
         resolve(this.events.shift());
       };
-      this.armWindow();
+      this.stopListening = this.window.onExpire(() => {
+        if (!this.yieldsThroughTarget()) this.wake?.();
+      });
     });
   }
 
-  private remainingWindowMs(): number {
-    const now = Date.now();
-    if (this.callActive > 0) {
-      // Call time is billed to the call's own planB window, never to the 1s program window.
-      return Math.max(0, this.callWaitBudgetMs - (now - (this.callStartedAt ?? now)));
+  private detachWindow(): void {
+    const stop = this.stopListening;
+    this.stopListening = undefined;
+    stop?.();
+  }
+
+  private yieldsThroughTarget(): boolean {
+    return this.controls.size === 1 && this.controls.values().next().value === this.window;
+  }
+
+  // 到期后的新操作只排队；只有显式恢复能提供新请求的窗口。
+  private async admit<T>(action: (window: RequestWindow) => T | Promise<T>): Promise<T> {
+    while (!this.dead) {
+      const window = this.window;
+      if (window.isOpen()) return action(window);
+      await new Promise<void>(resolve => { this.admissionWaiters.add(resolve); });
     }
-    return Math.max(0, this.budgetMs - (now - this.windowStartedAt - this.callWaitMs));
+    throw new ProgramError("ABANDONED", "程序已终止。");
   }
-
-  /** The window timer is never absent: every request must end in a park or an end event. */
-  private armWindow(): void {
-    this.clearWindowTimer();
-    if (!this.wake) return;
-    this.windowTimer = setTimeout(() => {
-      this.windowTimer = undefined;
-      this.wake?.();
-    }, Math.max(0, this.remainingWindowMs()));
+  private releaseAdmissions(): void {
+    const waiters = [...this.admissionWaiters];
+    this.admissionWaiters.clear();
+    for (const resolve of waiters) resolve();
   }
-
-  private clearWindowTimer(): void {
-    if (this.windowTimer !== undefined) {
-      clearTimeout(this.windowTimer);
-      this.windowTimer = undefined;
+  private deliverReply(reply: Extract<MainToWorker, { t: "reply" }>): void {
+    if (this.dead) return;
+    if (this.window.isOpen()) this.send(reply);
+    else this.queuedReplies.push(reply);
+  }
+  private useWindow(window: RequestWindow): void {
+    this.detachWindow();
+    this.detachedResult = undefined;
+    this.window = window;
+    if (window.isOpen()) {
+      while (!this.dead && this.queuedReplies.length && window.isOpen()) this.send(this.queuedReplies.shift()!);
+      this.releaseAdmissions();
     }
-  }
-
-  private beginCall(waitMs: number, planB: string | undefined): void {
-    if (this.callActive === 0) {
-      this.callStartedAt = Date.now();
-      this.callWaitBudgetMs = waitMs;
-      this.planB = planB;
-    }
-    this.callActive += 1;
-    this.armWindow();
-  }
-
-  private endCall(): void {
-    if (this.callActive === 0) return;
-    this.callActive -= 1;
-    if (this.callActive === 0) {
-      this.callWaitMs += Date.now() - (this.callStartedAt ?? Date.now());
-      this.callStartedAt = undefined;
-      this.armWindow();
-    }
-  }
-
-  /** A resumed program gets a fresh 1s program window plus the wait budget its unpark bought. */
-  private resetWindow(waitBudgetMs?: number): void {
-    const now = Date.now();
-    this.windowStartedAt = now;
-    this.callWaitMs = 0;
-    if (waitBudgetMs !== undefined) this.callWaitBudgetMs = waitBudgetMs;
-    if (this.callActive > 0) this.callStartedAt = now;
-    this.armWindow();
   }
 
   private push(event: Event): void {
@@ -218,13 +216,13 @@ class ProgramRun {
   /** Payload of a request-window expiry: the program (and any call) keeps running in the background. */
   private yieldPark(): RunProgramResult {
     const waitingOnCall = this.callActive > 0;
-    const budgetMs = waitingOnCall ? this.callWaitBudgetMs : this.budgetMs;
     return this.park("yield", {
       message: waitingOnCall
-        ? `call 的等待窗口（${budgetMs} ms）用完了，命令仍在后台运行。delta 是自上次 park 以来的新输出；用 this.unpark(handle, undefined, planB) 继续等它结束，planB 决定这次愿意等多久。`
-        : `本次请求的等待窗口（${budgetMs} ms）用完，程序仍在后台运行。delta 是自上次 park 以来的新输出；用 this.unpark(handle, undefined, planB) 继续等它结束，planB 决定这次愿意等多久。`,
-      ...(this.planB === undefined ? {} : { planB: this.planB }),
-      budgetMs,
+        ? `本次 js 请求的共享等待窗口（${this.window.budgetMs} ms）用完，已启动命令仍在后台运行。delta 是新增输出。下一次 js 请求提供顶层 planB，并用 this.unpark(handle) 继续，程序成员不能增加预算。`
+        : `本次 js 请求的共享等待窗口（${this.window.budgetMs} ms）用完。下一次 js 请求提供顶层 planB，并用 this.unpark(handle) 继续；全部 call 和 unpark 共用该请求的截止时间。`,
+      planB: this.window.planB,
+      budgetMs: this.window.budgetMs,
+      ...(this.window.capped ? { cappedFromMs: this.window.requestedMs } : {}),
       elapsedMs: Date.now() - this.startedAt,
       delta: this.hub.takeDelta(),
     });
@@ -235,8 +233,9 @@ class ProgramRun {
       this.input.workspaceId,
       kind,
       payload,
-      async (value, waitBudgetMs) => {
-        this.resetWindow(waitBudgetMs);
+      async (value, window) => {
+        this.useWindow(window);
+        if (!this.dead && !window.isOpen()) return this.park(kind, payload, resumeId);
         // A yield never injects the client's argument as the call result: the command keeps
         // running and the worker receives its real CallResult when it exits. Only explicit
         // parks (where/confirm/park) resume by handing `value` back to the program.
@@ -268,7 +267,7 @@ class ProgramRun {
     // A malformed message from user code must never take down the server process.
     let reply: Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">;
     try {
-      reply = await this.broker(msg);
+      reply = await this.admit(window => this.broker(msg, window));
     } catch (error) {
       reply = {
         error: {
@@ -277,11 +276,11 @@ class ProgramRun {
         },
       };
     }
-    this.send({ t: "reply", id: msg.id, ...reply });
+    this.deliverReply({ t: "reply", id: msg.id, ...reply });
   }
 
   /** this.unpark / this.abandon from inside a program resume another program's park. */
-  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" | "semble" | "signal" | "send" }>): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
+  private async broker(msg: Extract<WorkerToMain, { t: "unpark" | "abandon" | "call" | "semble" | "signal" | "send" }>, window: RequestWindow): Promise<Omit<Extract<MainToWorker, { t: "reply" }>, "t" | "id">> {
     if (msg.t === "semble") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
       try {
@@ -312,14 +311,11 @@ class ProgramRun {
     }
     if (msg.t === "call") {
       if (this.dead) return { error: { code: "ABANDONED", message: "程序已终止。" } };
-      const wait = planBWaitMs(msg.planB);
-      if ("error" in wait) return wait;
-      const call = this.hub.call(msg.command, msg.opts);
-      this.beginCall(wait.ms, typeof msg.planB === "string" ? msg.planB : undefined);
+      this.callActive += 1;
       try {
         // The request window (not this await) decides when the caller gets a park. The worker
         // stays suspended on this promise and receives the real CallResult whenever it arrives.
-        return { call: await call };
+        return { call: await this.hub.call(msg.command, msg.opts) };
       } catch (error) {
         return {
           error: isProgramError(error)
@@ -327,37 +323,34 @@ class ProgramRun {
             : { code: "CALL_FAILED", message: error instanceof Error ? error.message : String(error) },
         };
       } finally {
-        this.endCall();
+        this.callActive -= 1;
       }
     }
     const taken = this.parkTable.take(msg.handle, this.input.workspaceId);
-    if (taken.status === "not_found") {
-      return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}（已过期或已处理）。` } };
-    }
-    if (taken.status === "mismatch") {
-      // Never reveal that another workspace holds this handle: separate agents run in separate
-      // workspaces, and the caller has no business knowing about them. The site stays untouched.
-      return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}（已过期或已处理）。` } };
-    }
+    if (taken.status === "not_found") return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}` } };
+    if (taken.status === "mismatch") return { error: { code: "PARK_NOT_FOUND", message: `找不到挂起现场：${msg.handle}` } };
     const site = taken.site;
     if (msg.t === "abandon") {
       await site.abandon();
       return {};
     }
-    const wait = planBWaitMs(msg.planB);
-    if ("error" in wait) return wait;
-    // Resuming waits on the other program: this request is billed by its own planB, not by the
-    // 1s compute window, so `unpark(handle, undefined, planB)` can wait as long as it asked for.
-    this.beginCall(wait.ms, typeof msg.planB === "string" ? msg.planB : undefined);
-    let result: ParkResumeResult;
+    this.controls.set(msg.id, window);
     try {
-      result = await site.resume(msg.value, wait.ms);
+      const result = await site.resume(msg.value, window);
+      if (result.status === "parked") {
+        // 沿单一恢复链返回最深目标的真实现场，不能制造竞争的控制者 handle。
+        if (this.window === window && this.yieldsThroughTarget() && !window.isOpen()) {
+          this.kill({ status: "repark", repark: result, written: [] });
+          return {};
+        }
+        return { repark: result };
+      }
+      if (result.status === "done") return { value: result.value, written: result.written };
+      return { error: result.error ?? { code: "ABANDONED", message: "现场已放弃" } };
     } finally {
-      this.endCall();
+      this.controls.delete(msg.id);
+      if (!this.dead && !this.window.isOpen() && !this.yieldsThroughTarget()) this.wake?.();
     }
-    if (result.status === "parked") return { repark: result };
-    if (result.status === "done") return { value: result.value, written: result.written };
-    return { error: result.error ?? { code: "ABANDONED", message: "现场已放弃" } };
   }
 
   private send(msg: MainToWorker): void {
@@ -367,20 +360,6 @@ class ProgramRun {
   private merge(paths: string[]): void {
     this.written = union(this.written, paths);
   }
-}
-
-/** planB is user input: bytes x 50ms, 1s when omitted, a clean error otherwise. */
-function planBWaitMs(planB: unknown): { ms: number } | { error: { code: string; message: string } } {
-  if (planB === undefined) return { ms: CALL_WINDOW_MS };
-  if (typeof planB !== "string" || !planB) {
-    return {
-      error: {
-        code: "INVALID_ARGUMENT",
-        message: `planB 必须是非空字符串（收到 ${typeof planB}）；省略时这条请求等 1 秒。`,
-      },
-    };
-  }
-  return { ms: Buffer.byteLength(planB, "utf8") * 50 };
 }
 
 function union(a: string[], b: string[]): string[] {

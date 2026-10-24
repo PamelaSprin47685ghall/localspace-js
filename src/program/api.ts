@@ -29,7 +29,7 @@ export interface ApiContext {
   written: string[];
   /** Pause the program until a later this.unpark(handle, value) (worker-side park). */
   requestPark: (kind: "where" | "park" | "confirm", payload: unknown) => Promise<unknown>;
-  runCall: (command: string, planB: string | undefined, opts: CallOpts) => Promise<CallResult>;
+  runCall: (command: string, opts: CallOpts) => Promise<CallResult>;
   signalParked: (signal?: string) => Promise<void>;
   sendParked: (input: string) => Promise<void>;
   /** Built-in Semble search; `repo` is always bound to this workspace root by the main thread. */
@@ -113,16 +113,13 @@ export function createProgramApi(ctx: ApiContext) {
     if (rootHit) await requireDanger(rootHit, forceDangerous);
   };
 
-  const runCall = async (command: string, planB: string | undefined, opts: CallOpts = {}): Promise<CallResult> => {
+  const runCall = async (command: string, opts: CallOpts = {}): Promise<CallResult> => {
     if (typeof command !== "string" || !command) {
       throw new ProgramError("CALL_COMMAND_UNSUPPORTED", "this.call 需要一条命令字符串。");
     }
-    if (planB !== undefined && (typeof planB !== "string" || !planB)) {
-      throw new ProgramError("INVALID_ARGUMENT", "planB 必须是非空字符串；省略时这条命令有 1 秒等待窗口。");
-    }
     const hit = analyzeCommandDanger(command);
     if (hit) await requireDanger(hit, false);
-    return ctx.runCall(command, planB, opts);
+    return ctx.runCall(command, opts);
   };
 
   async function cat(path: string): Promise<string> {
@@ -269,8 +266,10 @@ export function createProgramApi(ctx: ApiContext) {
     noteWrite(absolute);
   }
 
-  async function call(command: string, planB?: string): Promise<CallResult> {
-    return runCall(command, planB, {});
+  async function call(command: string): Promise<CallResult> {
+    if (arguments.length !== 1)
+      throw new ProgramError("INVALID_ARGUMENT", "call(command) 只接受一个参数；等待预算来自 js 工具顶层 planB。");
+    return runCall(command, {});
   }
 
   async function signal(signalName?: string): Promise<void> {

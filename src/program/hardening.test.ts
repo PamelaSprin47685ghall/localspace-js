@@ -3,6 +3,8 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ParkTable } from "./park.js";
+import { RequestWindow } from "./request-window.js";
+import { RequestWindow } from "./request-window.js";
 import { liveProgramCount, runProgram, shutdownPrograms } from "./runner.js";
 import { STREAM_CAP, TailBuffer } from "./call.js";
 import { CAT_MAX_BYTES } from "./api.js";
@@ -37,7 +39,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
     configDir,
     stateDir,
     program,
-    yieldBudgetMs: opts.budget ?? 30_000,
+    planB: 'w'.repeat(Math.ceil((opts.budget ?? 30_000) / 50)),
     parkTable: opts.parkTable ?? new ParkTable(60_000),
     signal: opts.signal,
   });
@@ -65,11 +67,13 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
   // resuming a still-busy program yields again at the next budget instead of hanging
   const busySite = table.take(parked.parked!.handle);
   assert.equal(busySite.status, "ok");
-  const again = await (busySite as { site: { resume: (v: unknown, ms?: number) => Promise<{ parked?: { kind: string; handle: string } }> } }).site.resume(undefined, 1000);
+  if (busySite.status !== "ok") throw new Error("missing busy site");
+  const again = await busySite.site.resume(undefined, new RequestWindow("w".repeat(20)));
   assert.equal(again.parked?.kind, "yield");
   const againSite = table.take(again.parked!.handle);
   assert.equal(againSite.status, "ok");
-  await (againSite as { site: { abandon: () => Promise<void> } }).site.abandon();
+  if (againSite.status !== "ok") throw new Error("missing resumed site");
+  await againSite.site.abandon();
   await sleep(100);
   assert.equal(liveProgramCount(), 0);
   console.log("while(true) isolated + abandon: ok");
@@ -85,7 +89,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
 
 // Foreground call whose grandchild keeps the pipe open returns promptly; the leftover is killed.
 {
-  const r = await run(`const x = await this.call("(sleep 300 &); echo hi", "不用跑"); return { out: x.stdout, pid: x.pid, ms: x.durationMs };`);
+  const r = await run(`const x = await this.call("(sleep 300 &); echo hi"); return { out: x.stdout, pid: x.pid, ms: x.durationMs };`);
   assert.equal(r.status, "done", JSON.stringify(r));
   const v = r.value as { out: string; pid: number; ms: number };
   assert.match(v.out, /hi/);
@@ -97,7 +101,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
 // Output cap: only the tail is kept, dropped bytes are reported.
 {
   const r = await run(
-    `const x = await this.call("head -c 5000000 /dev/zero | tr '\\\\0' a; echo END", "不用跑"); return { len: x.stdout.length, t: x.truncated, dropped: x.truncatedBytes.stdout, total: x.bytes.stdout, end: x.stdout.trimEnd().endsWith("END") };`,
+    `const x = await this.call("head -c 5000000 /dev/zero | tr '\\\\0' a; echo END"); return { len: x.stdout.length, t: x.truncated, dropped: x.truncatedBytes.stdout, total: x.bytes.stdout, end: x.stdout.trimEnd().endsWith("END") };`,
   );
   assert.equal(r.status, "done", JSON.stringify(r));
   const v = r.value as { len: number; t: boolean; dropped: number; total: number; end: boolean };
@@ -137,18 +141,40 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
   console.log("park TTL sweep cleans table: ok");
 }
 
-// Request cancel (AbortSignal) kills the program and its groups.
+// Client disconnect (AbortSignal) keeps the program alive and leaves a claimable park.
 {
+  const table = new ParkTable(60_000);
   const ac = new AbortController();
-  const pending = run(
-    `await new Promise(() => {});`,
-    { signal: ac.signal },
-  );
-  await sleep(100);
+  const pending = run(`const out = await this.call("sleep 1.2; echo KEPT"); return out.stdout.trim();`, {
+    signal: ac.signal,
+    parkTable: table,
+  });
+  await sleep(150);
   ac.abort();
-  const r = await pending;
-  assert.equal(r.error?.code, "CANCELLED");
-  console.log("request cancel ends program: ok");
+  const gone = await pending;
+  assert.equal(gone.status, "parked", JSON.stringify(gone));
+  const handle = gone.parked!.handle;
+  assert.equal(table.list("ws_hard").length, 1, "disconnect must leave a claimable site");
+  await sleep(1300);
+  const taken = table.take(handle, "ws_hard");
+  assert.equal(taken.status, "ok");
+  const resumed = await (taken as { site: { resume: (v: unknown, w: unknown) => Promise<{ status: string; value?: unknown }> } }).site.resume(
+    undefined,
+    new RequestWindow("w".repeat(400)),
+  );
+  assert.equal(resumed.status, "done", JSON.stringify(resumed));
+  assert.equal(resumed.value, "KEPT");
+  console.log("client disconnect keeps the program alive: ok");
+}
+
+// planB is capped at 30s no matter how long it is written.
+{
+  assert.equal(new RequestWindow("b".repeat(200)).budgetMs, 10_000);
+  const long = new RequestWindow("b".repeat(2_000));
+  assert.equal(long.requestedMs, 100_000);
+  assert.equal(long.budgetMs, 30_000);
+  assert.equal(long.capped, true);
+  console.log("request window is capped at 30s: ok");
 }
 
 // Event-loop lag monitor warns when the main thread stalls.
@@ -174,8 +200,8 @@ console.log("hardening.test.ts: all ok");
 {
   const table = new ParkTable(60_000);
   const first = await run(
-    `return await this.call("echo EARLY; sleep 0.6; echo LATE", "yyyyyyyy");`,
-    { budget: 5000, parkTable: table },
+    `return await this.call("echo EARLY; sleep 0.6; echo LATE");`,
+    { budget: 400, parkTable: table },
   );
   assert.equal(first.parked?.kind, "yield");
   const payload = first.parked!.payload as { delta?: { stdout: string } };
@@ -198,8 +224,8 @@ console.log("hardening.test.ts: all ok");
 {
   const r = await run(
     `const [a, b] = await Promise.all([
-      this.call("sleep 0.3; echo A", "p".repeat(40)),
-      this.call("sleep 0.3; echo B", "p".repeat(40)),
+      this.call("sleep 0.3; echo A"),
+      this.call("sleep 0.3; echo B"),
     ]);
     return { a: a.stdout.trim(), b: b.stdout.trim() };`,
     { budget: 10_000 },
@@ -209,100 +235,25 @@ console.log("hardening.test.ts: all ok");
   console.log("parallel calls keep separate output: ok");
 }
 
-// Call time is free: a 1.4s call does not consume the 1s request window.
-{
-  const r = await run(
-    `const out = await this.call("sleep 1.4; echo OK", "p".repeat(40));
-     return out.stdout.trim();`,
-    { budget: 1000 },
-  );
-  assert.equal(r.status, "done", JSON.stringify(r));
-  assert.equal(r.value, "OK");
-  console.log("call time excluded from request window: ok");
-}
-
-// A call without planB gets a 1s window; unpark still delivers the real result.
+// Shared entry deadline never disappears while waiting for a command.
 {
   const table = new ParkTable(60_000);
-  const first = await run(`return await this.call("echo EARLY; sleep 1.3; echo LATE");`, {
-    budget: 60_000,
-    parkTable: table,
-  });
-  assert.equal(first.parked?.kind, "yield");
-  const payload = first.parked!.payload as { planB?: string; budgetMs: number; delta: { stdout: string } };
-  assert.equal(payload.planB, undefined);
-  assert.equal(payload.budgetMs, 1000);
-  assert.match(payload.delta.stdout, /EARLY/);
-  await sleep(600);
-  const resumed = await run(`return await this.unpark(${JSON.stringify(first.parked!.handle)});`, {
-    budget: 60_000,
-    parkTable: table,
-  });
-  assert.equal(resumed.status, "done", JSON.stringify(resumed));
-  const v = resumed.value as { exitCode: number; stdout: string };
-  assert.equal(v.exitCode, 0);
-  assert.match(v.stdout, /LATE/);
-  console.log("planB-less call yields at 1s and keeps output: ok");
-}
-
-// unpark's planB buys the wait for an already-running call (no 1s poking).
-{
-  const table = new ParkTable(60_000);
-  const first = await run(`return await this.call("sleep 1.2; echo OK", "x");`, {
-    budget: 60_000,
-    parkTable: table,
-  });
-  assert.equal(first.parked?.kind, "yield");
-  const resumed = await run(
-    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, undefined, "p".repeat(40));`,
-    { budget: 60_000, parkTable: table },
-  );
-  assert.equal(resumed.status, "done", JSON.stringify(resumed));
-  assert.equal((resumed.value as { stdout: string }).stdout.trim(), "OK");
-  console.log("unpark planB waits for the live call: ok");
-}
-
-// The wait timer is never absent: a call that never exits still returns a yield park on unpark.
-{
-  const table = new ParkTable(60_000);
-  const first = await run(`return await this.call("sleep 30", "x");`, { budget: 60_000, parkTable: table });
+  const first = await run('return await this.call("sleep 30");', { budget: 400, parkTable: table });
   assert.equal(first.parked?.kind, "yield");
   const startedAt = Date.now();
-  const again = await run(
-    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, undefined, "p".repeat(20));`,
-    { budget: 60_000, parkTable: table },
-  );
+  const again = await run(`return await this.unpark(${JSON.stringify(first.parked!.handle)});`, { budget: 1000, parkTable: table });
   assert.equal(again.parked?.kind, "yield", JSON.stringify(again));
-  assert.ok(Date.now() - startedAt < 5_000);
-  const abandoned = await run(`return await this.abandon(${JSON.stringify(again.parked!.handle)});`, {
-    budget: 60_000,
-    parkTable: table,
-  });
+  assert.ok(Date.now() - startedAt < 3000);
+  const abandoned = await run(`return await this.abandon(${JSON.stringify(again.parked!.handle)});`, { parkTable: table });
   assert.equal(abandoned.status, "done", JSON.stringify(abandoned));
-  console.log("stuck call still yields instead of hanging: ok");
-}
-
-// planB is user input: a number must fail cleanly instead of crashing the server process.
-{
-  const table = new ParkTable(60_000);
-  const first = await run(`return await this.call("sleep 20", "x");`, { budget: 60_000, parkTable: table });
-  assert.equal(first.parked?.kind, "yield");
-  const bad = await run(
-    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, undefined, 120000);`,
-    { budget: 60_000, parkTable: table },
-  );
-  assert.equal(bad.status, "failed", JSON.stringify(bad));
-  assert.equal(bad.error?.code, "INVALID_ARGUMENT");
-  const after = await run(`return "alive";`, { budget: 60_000, parkTable: table });
-  assert.equal(after.status, "done");
-  await run(`return await this.abandon(${JSON.stringify(first.parked!.handle)});`, { budget: 60_000, parkTable: table });
-  console.log("non-string planB fails cleanly: ok");
+  assert.equal(table.size, 0);
+  console.log("shared deadline bounds unpark of a stuck command: ok");
 }
 
 // A handle from another workspace is rejected without being consumed.
 {
   const table = new ParkTable(60_000);
-  const first = await run(`return await this.call("sleep 30", "x");`, { budget: 60_000, parkTable: table, workspaceId: "ws_a" });
+  const first = await run(`return await this.call("sleep 30");`, { budget: 400, parkTable: table, workspaceId: "ws_a" });
   const handle = first.parked!.handle;
   const stray = await run(`return await this.unpark(${JSON.stringify(handle)});`, { budget: 60_000, parkTable: table, workspaceId: "ws_b" });
   assert.equal(stray.status, "failed", JSON.stringify(stray));

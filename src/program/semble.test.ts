@@ -47,7 +47,7 @@ async function run(program: string, workspaceRoot = root) {
     configDir: join(workspaceRoot, ".localspace"),
     stateDir: join(workspaceRoot, "state"),
     program,
-    yieldBudgetMs: 30_000,
+    planB: 'w'.repeat(600),
     parkTable: new ParkTable(60_000),
   });
 }

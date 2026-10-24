@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { ParkTable } from "./park.js";
-import { runProgram } from "./runner.js";
+import { runProgram, shutdownPrograms } from "./runner.js";
 import { analyzeCommandDanger, assertInsideRoots, assertNotAuthFile } from "./guard.js";
 import { whereAll } from "./where.js";
 import { PAIR_HINT_SEPARATOR, composePairHints, appendPairHints } from "./pair-hint.js";
@@ -28,7 +28,7 @@ async function run(program: string) {
     configDir,
     stateDir,
     program,
-    yieldBudgetMs: 30_000,
+    planB: 'w'.repeat(600),
     parkTable,
   });
 }
@@ -76,7 +76,7 @@ async function run(program: string) {
 
 {
   const result = await run(`
-    return await this.call("rm -rf totally-not-real-path-xyz", "先不删");
+    return await this.call("rm -rf totally-not-real-path-xyz");
   `);
   assert.equal(result.status, "parked");
   assert.equal(result.parked?.kind, "confirm");
@@ -135,7 +135,7 @@ async function run(program: string) {
 }
 
 {
-  // yield park via call planB
+  // yield park via the top-level request planB
   const result = await runProgram({
     workspaceId: "ws_test",
     root,
@@ -143,9 +143,10 @@ async function run(program: string) {
     configDir,
     stateDir,
     program: `
-      await this.call("sleep 1", "x".repeat(3));
+      await this.call("sleep 1");
       return "done";
     `,
+    planB: "abc",
     parkTable: new ParkTable(60_000),
   });
   assert.equal(result.status, "parked");
@@ -154,9 +155,9 @@ async function run(program: string) {
 }
 
 {
-  // foreground call with planB
+  // foreground call uses the top-level request planB
   const result = await run(`
-    const out = await this.call("echo hello", "不用跑");
+    const out = await this.call("echo hello");
     return out.stdout.trim();
   `);
   assert.equal(result.status, "done");
@@ -174,5 +175,7 @@ async function run(program: string) {
   console.log("this.abandon: ok");
 }
 
+parkTable.clear();
+shutdownPrograms();
 rmSync(root, { recursive: true, force: true });
 console.log("program.test.ts: all ok");
