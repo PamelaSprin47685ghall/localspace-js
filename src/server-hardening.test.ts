@@ -178,6 +178,14 @@ for (const modern of [false, true]) {
   console.log(`${modern ? "2026-07-28" : "2025-era"} client disconnect keeps program + park: ok`);
 }
 
+// The contract is strict: intent is the only name. planB alone must not run anything.
+{
+  const res = await rpc("tools/call", { name: "js", arguments: { planB: TEST_PLAN, workspaceId, program: "return 11;" } }, { modern: true, name: "js" });
+  const body = (await res.json()) as { error?: { code: number }; result?: { isError?: boolean } };
+  assert.ok(body.error || body.result?.isError, JSON.stringify(body));
+  console.log("planB alone is rejected (intent only): ok");
+}
+
 // A long-running call parks on its intent budget; healthz and another tool call stay fast.
 const busyStarted = Date.now();
 const sleepCommand = 'node -e "process.stdin.resume()"';
