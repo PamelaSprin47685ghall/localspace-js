@@ -34,6 +34,14 @@
 - 硬性拒绝：路径越出 `allowedRoots`、改写 `auth.json`
 - 工具结果在 `\u0000\uFEFF`（NUL+BOM）之后附带 Pair Hint（`now` ISO UTC 时间、git 脏度、park 现场等）；`structuredContent.servedAt` 是同一时间，模型据此知道“现在几点”
 
+### 运行态事实和提示的归属
+
+这里的等待预算属于**每一次 `js` 工具请求**，不是模型上下文的 Scope 预算。服务器按顶层必填 `intent` 的实际 UTF-8 字节数计算、封顶并执行一个共享截止时间；工具回执所展示的预算也来自同一个 `RequestWindow` 计算函数，**不是剩余时间、不是模型自报的 KPI**。下一次 `unpark` 要通过新请求重新提交 `intent`，不会补充上一请求的时间。
+
+工作区是否从磁盘会话记录恢复，由 `WorkspaceRegistry` 判定。仅已存在的持久工作区第一次被本进程载入时，才附加一次对应工作区的 `restored` 观察；全新工作区不报恢复，一个工作区的提示也不会被另一个抢先消耗。此提示只说明**会话记录已恢复**，不宣称旧进程的内存 `park` 现场尚能恢复。Git 状态探测失败时显示 `git status unknown`，不冒称 `clean`。
+
+该项目只有 MCP 工具面，没有截取完整模型 Provider 请求或发起 agent-attributed 强 steer 的宿主权限，所以不引入假的 `resetScope`、`askPreviousScope` 或持久模型预算。现有 MCP Pair Hint 仍按兼容的 NUL+BOM 边界显示在工具文本中，属于 Host 的**观察信息**；程序原始返回值仍存于 `structuredContent`，不由 Host 提示改写。未来只有增加真正的 Provider 宿主边界后，才可能将提醒改为独立 steer。
+
 ### 顶层等待窗口
 
 提交工具参数：

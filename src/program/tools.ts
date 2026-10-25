@@ -10,6 +10,7 @@ import { API_BRIEF, GUIDELINE_MOTTO, GUIDELINE_TEXT } from "./guideline.js";
 import { runProgram } from "./runner.js";
 import { globalParkTable } from "./park.js";
 import { appendPairHints, composePairHints } from "./pair-hint.js";
+import { observeIntentBudget } from "./request-window.js";
 
 export interface JsSurfaceDeps {
   config: ServerConfig;
@@ -18,8 +19,6 @@ export interface JsSurfaceDeps {
   activityLog: ToolActivityLogManager;
   configDir: string;
 }
-
-let restartHintPending = true;
 
 export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void {
   const { config, workspaces, auditLog, configDir } = deps;
@@ -96,7 +95,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           root: body.root,
           ...(await gitHint(body.root)),
           parked: globalParkTable.list(body.workspaceId),
-          restart: takeRestartHint(),
+          restart: workspaces.takeRestoredNotice(body.workspaceId),
           motto: GUIDELINE_MOTTO,
         });
         return {
@@ -185,6 +184,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
               }
             : undefined;
 
+        const admittedBudget = observeIntentBudget(intent);
         const hints = composePairHints({
           now: servedAt,
           workspaceId: workspace.id,
@@ -192,7 +192,8 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           ...(await gitHint(workspace.root)),
           parked: globalParkTable.list(workspace.id),
           yieldPark: result.status === "parked" && result.parked?.kind === "yield",
-          restart: takeRestartHint(),
+          budget: { bytes: admittedBudget.bytes, ms: admittedBudget.budgetMs },
+          restart: workspaces.takeRestoredNotice(workspace.id),
           risk,
           motto: GUIDELINE_MOTTO,
         });
@@ -243,12 +244,6 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       }
     },
   );
-}
-
-function takeRestartHint(): boolean {
-  if (!restartHintPending) return false;
-  restartHintPending = false;
-  return true;
 }
 
 function formatJsResult(result: {

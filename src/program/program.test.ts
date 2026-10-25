@@ -131,6 +131,15 @@ async function run(program: string) {
   assert.ok(hints.includes(PAIR_HINT_SEPARATOR + "now 2026-10-24T10:30:00.000Z"), hints);
   assert.equal(new Date("2026-10-24T10:30:00.000Z").toISOString(), "2026-10-24T10:30:00.000Z");
   assert.equal(appendPairHints("body", hints), "body" + hints);
+  assert.match(hints, /dirty 1 files/);
+  const unknown = composePairHints({workspaceId: "ws", root: "/tmp/x", parked: [], motto: "口诀"});
+  assert.match(unknown, /git status unknown/, "a missing Git observation is not evidence of a clean worktree");
+  assert.doesNotMatch(unknown, /branch .* · clean/);
+  const empty = composePairHints({workspaceId: "ws", root: "/tmp/x", parked: [], motto: "口诀", git: {staged: 0, unstaged: 0, untracked: 0, dirty: false}});
+  assert.match(empty, / · clean/);
+  const recovered = composePairHints({workspaceId: "ws", root: "/tmp/x", parked: [], motto: "口诀", restart: true});
+  assert.match(recovered, /restored: 已有工作区从持久会话记录载入/);
+  assert.doesNotMatch(unknown, /restored:/);
   console.log("pair-hint: ok");
 }
 

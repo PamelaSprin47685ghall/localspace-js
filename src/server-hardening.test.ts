@@ -109,6 +109,14 @@ function rpc(method: string, params: Record<string, unknown>, opts: { modern?: b
   const t = res.content[0]!.text;
   const sep = t.indexOf("\u0000\uFEFF");
   assert.ok(sep > 0 && t.slice(0, sep).startsWith("status: done"), "body first");
+  assert.match(t.slice(sep), new RegExp(`budget: intent ${Buffer.byteLength(TEST_PLAN, "utf8")}B`),
+    "tool hint reports the actual admitted top-level intent, not a model-estimated balance");
+  assert.doesNotMatch(t.slice(sep), /restored:/,
+    "freshly opened workspace must not claim to have lost an old process park");
+  assert.match(t.slice(sep), /git status unknown/,
+    "this non-Git physical workspace has no valid Git status observation, not a clean status");
+  assert.equal(res.structuredContent.value, 42,
+    "machine-readable tool result must remain untouched by Host hints");
 
   // workspaceId is optional: the most recent workspace is reused.
   const omitted = await rpc("tools/call", { name: "js", arguments: { intent: TEST_PLAN, program: `return 6 * 7; // ${"pad".repeat(200)}` } }, { modern: true, name: "js" });
@@ -220,9 +228,58 @@ const big = await b.callTool({ name: "js", arguments: { intent: TEST_PLAN, works
 assert.equal(structured(big).value, 300_000, text(big));
 console.log("300KB request body accepted: ok");
 
+// A real restart preserves workspace identities, not in-memory park sites or a global one-shot hint.
+{
+  mkdirSync(join(root, "proj-second"), { recursive: true });
+  const openedSecond = await a.callTool({ name: "open_workspace", arguments: { path: join(root, "proj-second") } });
+  const secondId = structured(openedSecond).workspaceId as string;
+  assert.notEqual(secondId, workspaceId);
+}
 await a.close();
 await b.close();
 await stop();
+
+// The new process must report restored state once PER persisted workspace, never on a new root.
+{
+  const restarted = await listen("none");
+  const restoredClient = new Client({ name: "restarted-workspace-test", version: "0" });
+  await restoredClient.connect(new StreamableHTTPClientTransport(new URL(`${restarted.base}/mcp`)));
+  try {
+    const saved = await restoredClient.callTool({
+      name: "js", arguments: { workspaceId, intent: TEST_PLAN, program: "return 42;" },
+    });
+    assert.equal(structured(saved).value, 42);
+    assert.match(text(saved), /restored: 已有工作区从持久会话记录载入/);
+    const repeated = await restoredClient.callTool({
+      name: "js", arguments: { workspaceId, intent: TEST_PLAN, program: "return 42;" },
+    });
+    assert.equal(structured(repeated).value, 42);
+    assert.doesNotMatch(text(repeated), /restored:/, "the same workspace gets only one notice");
+
+    const other = await restoredClient.callTool({
+      name: "open_workspace", arguments: { path: join(root, "proj-second") },
+    });
+    assert.match(text(other), /restored: 已有工作区从持久会话记录载入/,
+      "restoring by path has an independent notice");
+    const otherId = structured(other).workspaceId as string;
+    const otherAgain = await restoredClient.callTool({
+      name: "js", arguments: { workspaceId: otherId, intent: TEST_PLAN, program: "return 7;" },
+    });
+    assert.doesNotMatch(text(otherAgain), /restored:/);
+    assert.equal(structured(otherAgain).value, 7);
+
+    mkdirSync(join(root, "new-after-restart"), { recursive: true });
+    const first = await restoredClient.callTool({
+      name: "open_workspace", arguments: { path: join(root, "new-after-restart") },
+    });
+    assert.doesNotMatch(text(first), /restored:/,
+      "a newly created workspace did not lose an in-memory park before it existed");
+  } finally {
+    await restoredClient.close();
+    await restarted.stop();
+  }
+  console.log("real MCP restart: workspace-local, truthful, once-only host observation: ok");
+}
 
 // OAuth mode: a bad bearer token is 401 with a challenge, not 500.
 {

@@ -22,9 +22,11 @@ export function composePairHints(input: PairHintInput): string {
   const blocks: string[] = [];
   blocks.push(input.motto.trim());
   if (input.now) blocks.push(`now ${input.now}`);
-  const dirty = input.git?.dirty
-    ? `dirty ${input.git.staged + input.git.unstaged + input.git.untracked} files`
-    : "clean";
+  const dirty = input.git === undefined
+    ? "git status unknown"
+    : input.git.dirty
+      ? `dirty ${input.git.staged + input.git.unstaged + input.git.untracked} files`
+      : "clean";
   blocks.push(`workspace ${input.workspaceId} @ ${input.root} · branch ${input.branch ?? "?"} · ${dirty}`);
   if (input.parked.length > 0) {
     blocks.push(
@@ -44,8 +46,8 @@ export function composePairHints(input: PairHintInput): string {
           : ""),
     );
   }
-  if (input.budget) blocks.push(`budget: intent ${input.budget.bytes}B → ${(input.budget.ms / 1000).toFixed(1)}s` + (input.yieldPark ? " · 已用完；先重读 intent，够用就 abandon，否则写新 intent 再 unpark" : ""));
-  if (input.restart) blocks.push("restart: 进程内 park 现场已清空；以当前磁盘与 git 为准继续");
+  if (input.budget) blocks.push(`budget: intent ${input.budget.bytes}B → ${(input.budget.ms / 1000).toFixed(1)}s (本次准入等待上限，不是剩余时间)` + (input.yieldPark ? " · 已用完；新请求须提供自己的 intent 才能 unpark" : ""));
+  if (input.restart) blocks.push("restored: 已有工作区从持久会话记录载入；该记录不包含进程内 park 现场，请依据本次实际磁盘、git 与 parked 观察继续");
   if (input.risk) {
     blocks.push(
       `risk: ${input.risk.op}` +

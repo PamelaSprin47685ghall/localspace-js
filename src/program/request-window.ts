@@ -4,6 +4,13 @@ import { performance } from "node:perf_hooks";
 /** 单次请求最长等待 30 秒：intent 再长也按这个数封顶（= 600 个 UTF-8 字节）。 */
 export const MAX_REQUEST_WAIT_MS = 30_000;
 
+/** One authoritative calculation shared by the executor and its advisory receipt. */
+export function observeIntentBudget(intent: string): { bytes: number; requestedMs: number; budgetMs: number } {
+  const bytes = Buffer.byteLength(intent, "utf8");
+  const requestedMs = bytes * 50;
+  return { bytes, requestedMs, budgetMs: Math.min(requestedMs, MAX_REQUEST_WAIT_MS) };
+}
+
 export class RequestWindow {
   /** 实际生效的等待预算（已封顶）。 */
   readonly budgetMs: number;
@@ -16,8 +23,9 @@ export class RequestWindow {
   private readonly listeners = new Map<number, () => void>();
 
   constructor(readonly intent: string) {
-    this.requestedMs = Buffer.byteLength(intent, "utf8") * 50;
-    this.budgetMs = Math.min(this.requestedMs, MAX_REQUEST_WAIT_MS);
+    const observed = observeIntentBudget(intent);
+    this.requestedMs = observed.requestedMs;
+    this.budgetMs = observed.budgetMs;
     this.deadline = performance.now() + this.budgetMs;
   }
   get capped(): boolean { return this.requestedMs > this.budgetMs; }

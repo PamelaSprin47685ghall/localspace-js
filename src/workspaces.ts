@@ -74,6 +74,8 @@ type DirectoryOps = {
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
   private lastUsedId?: string;
+  /** Only disk-restored sessions need an ephemeral-state warning, once per workspace. */
+  private readonly restoredNotices = new Set<string>();
 
   constructor(
     private readonly config: ServerConfig,
@@ -126,9 +128,17 @@ export class WorkspaceRegistry {
     };
     this.store?.touchSession(workspaceId);
     this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+    this.restoredNotices.add(restoredWorkspace.id);
     this.lastUsedId = restoredWorkspace.id;
 
     return restoredWorkspace;
+  }
+
+  /** A restored workspace has no transferable in-memory park site from the old process. */
+  takeRestoredNotice(workspaceId: string): boolean {
+    if (!this.restoredNotices.has(workspaceId)) return false;
+    this.restoredNotices.delete(workspaceId);
+    return true;
   }
 
   /**
@@ -288,6 +298,7 @@ export class WorkspaceRegistry {
       return { workspace: existing, agentsFiles, availableAgentsFiles };
     }
 
+    const recoveredFromDisk = this.store?.getSession(id) !== undefined;
     const workspace: Workspace = {
       id,
       root: input.root,
@@ -308,6 +319,7 @@ export class WorkspaceRegistry {
       managed: workspace.worktree?.managed,
     });
     this.workspaces.set(workspace.id, workspace);
+    if (recoveredFromDisk) this.restoredNotices.add(workspace.id);
     this.lastUsedId = workspace.id;
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);

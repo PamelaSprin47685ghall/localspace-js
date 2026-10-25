@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { ParkTable } from "./park.js";
+import { RequestWindow, observeIntentBudget } from "./request-window.js";
 import { liveProgramCount, runProgram, shutdownPrograms, type RunProgramInput, type RunProgramResult } from "./runner.js";
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -92,6 +93,16 @@ async function check(name: string, body: (fixture: Fixture) => Promise<void>) {
   await Promise.all([mkdir(h.file("config")), mkdir(h.file("state"))]);
   try { await body(h); console.log("ok " + (++passed) + " - " + name); }
   finally { await h.cleanup(); }
+}
+
+{
+  const raw = "界".repeat(250);
+  const observed = observeIntentBudget(raw);
+  const window = new RequestWindow(raw);
+  assert.equal(observed.bytes, 750, "UTF-8 bytes, not codepoints, determine the real budget");
+  assert.equal(observed.requestedMs, 37_500);
+  assert.equal(observed.budgetMs, 30_000, "the Host, not model prose, enforces the cap");
+  assert.equal(window.budgetMs, observed.budgetMs, "reported and enforced budgets have one owner");
 }
 
 await check("top-level intent validates before worker or effects; whitespace is accepted", async h => {

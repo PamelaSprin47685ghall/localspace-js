@@ -177,9 +177,13 @@ try {
   const firstStore = new SqliteWorkspaceStore(stateDir);
   const persistentRegistry = new WorkspaceRegistry(config, firstStore);
   const persistentWorkspace = await persistentRegistry.openWorkspace(root);
+  assert.equal(persistentRegistry.takeRestoredNotice(persistentWorkspace.workspace.id), false,
+    "a newly opened workspace does not have a previous-process state to recover");
   // Reopening with the store attached upserts the existing session instead of failing on the primary key.
   const persistentAgain = await persistentRegistry.openWorkspace(root);
   assert.equal(persistentAgain.workspace.id, persistentWorkspace.workspace.id);
+  assert.equal(persistentRegistry.takeRestoredNotice(persistentAgain.workspace.id), false,
+    "opening the same workspace twice in one process is not a restart");
   const persistentWorktree = await persistentRegistry.openWorkspace({
     path: gitRoot,
     mode: "worktree",
@@ -191,12 +195,18 @@ try {
   const restoredWorkspace = restoredRegistry.getWorkspace(persistentWorkspace.workspace.id);
   assert.equal(restoredWorkspace.root, root);
   assert.equal(restoredWorkspace.mode, "checkout");
+  assert.equal(restoredRegistry.takeRestoredNotice(restoredWorkspace.id), true);
+  assert.equal(restoredRegistry.takeRestoredNotice(restoredWorkspace.id), false,
+    "the same restored workspace must never be warned a second time");
 
   const restoredWorktree = restoredRegistry.getWorkspace(persistentWorktree.workspace.id);
   assert.equal(restoredWorktree.mode, "worktree");
   assert.equal(restoredWorktree.sourceRoot, gitRoot);
   assert.equal(restoredWorktree.root, persistentWorktree.workspace.root);
   assert.equal(restoredWorktree.worktree?.managed, true);
+  assert.equal(restoredRegistry.takeRestoredNotice(restoredWorktree.id), true,
+    "one restored workspace must not steal another workspace's restart notice");
+  assert.equal(restoredRegistry.takeRestoredNotice(restoredWorktree.id), false);
   secondStore.close();
 
   {
@@ -204,6 +214,15 @@ try {
     const thirdStore = new SqliteWorkspaceStore(stateDir);
     const thirdRegistry = new WorkspaceRegistry(config, thirdStore);
     assert.equal(thirdRegistry.latestWorkspace().id, persistentWorktree.workspace.id);
+    assert.equal(thirdRegistry.takeRestoredNotice(persistentWorktree.workspace.id), true,
+      "restoration through the default workspace must be observed too");
+    assert.equal(thirdRegistry.takeRestoredNotice(persistentWorkspace.workspace.id), false,
+      "an unopened other workspace must not invent a restoration event");
+    const reopenedFromPath = await thirdRegistry.openWorkspace(root);
+    assert.equal(reopenedFromPath.workspace.id, persistentWorkspace.workspace.id);
+    assert.equal(thirdRegistry.takeRestoredNotice(reopenedFromPath.workspace.id), true,
+      "restoration through open_workspace(path) must be reported exactly once");
+    assert.equal(thirdRegistry.takeRestoredNotice(reopenedFromPath.workspace.id), false);
     thirdStore.close();
   }
 
