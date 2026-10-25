@@ -137,7 +137,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           .nullish()
           .describe("open_workspace 返回的稳定标识，或项目根目录路径。省略则复用最近使用的工作区。"),
         program: z.string().min(1).describe("平铺的异步 JavaScript 程序体，可直接 await 顶层。"),
-        intent: z.string().min(1).describe("本次请求想达成什么（不是退路）。换算：每 20 个 UTF-8 字节 = 1 秒，单次请求最多 30 秒（600 字节，写更长也按 30 秒封顶）。这个截止时间被整次请求及其全部 call、unpark 共用，程序内不能续期；客户端断开时程序继续在后台跑。"),
+        intent: z.string().min(1).describe("本次请求想达成什么。换算：每 20 个 UTF-8 字节 = 1 秒，单次请求最多 30 秒（600 字节，写更长也按 30 秒封顶）。这个截止时间被整次请求及其全部 call、unpark 共用，程序内不能续期；客户端断开时程序继续在后台跑。"),
       }),
       outputSchema: z.object({
         servedAt: z.string().describe("本次回复的 UTC 时间（ISO 8601）。"),
