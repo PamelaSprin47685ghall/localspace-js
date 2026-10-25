@@ -44,7 +44,7 @@ export function composePairHints(input: PairHintInput): string {
           : ""),
     );
   }
-  if (input.budget) blocks.push(`budget: planB ${input.budget.bytes}B → ${(input.budget.ms / 1000).toFixed(1)}s` + (input.yieldPark ? " · 已用完；先重读 planB，够用就 abandon，否则写新 planB 再 unpark" : ""));
+  if (input.budget) blocks.push(`budget: intent ${input.budget.bytes}B → ${(input.budget.ms / 1000).toFixed(1)}s` + (input.yieldPark ? " · 已用完；先重读 intent，够用就 abandon，否则写新 intent 再 unpark" : ""));
   if (input.restart) blocks.push("restart: 进程内 park 现场已清空；以当前磁盘与 git 为准继续");
   if (input.risk) {
     blocks.push(

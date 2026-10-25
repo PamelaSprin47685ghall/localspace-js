@@ -11,7 +11,7 @@ const literal = (value: unknown) => JSON.stringify(value) ?? "undefined";
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 const command = (source: string) => quote(process.execPath) + " -e " + quote(source);
 // Host fixture data, never computed inside a model program.
-const planB = (ms: number) => "b".repeat(Math.ceil(ms / 50));
+const intent = (ms: number) => "b".repeat(Math.ceil(ms / 50));
 const resume = (handle: string, value?: unknown) => "return await this.unpark(" + literal(handle) + "," + literal(value) + ");";
 async function exists(path: string): Promise<boolean> {
   try { await access(path); return true; } catch (error) {
@@ -56,11 +56,11 @@ class Fixture {
   file(name: string) { return join(this.root, name); }
   input(program: string, budget: string): RunProgramInput {
     return { workspaceId: this.workspaceId, root: this.root, allowedRoots: [this.root],
-      configDir: this.file("config"), stateDir: this.file("state"), program, planB: budget, parkTable: this.table };
+      configDir: this.file("config"), stateDir: this.file("state"), program, intent: budget, parkTable: this.table };
   }
   start(program: string, ms = 8000) {
     const at = performance.now();
-    return { at, ms, result: runProgram(this.input(program, planB(ms))) };
+    return { at, ms, result: runProgram(this.input(program, intent(ms))) };
   }
   run(program: string, ms = 8000) { return within(this.start(program, ms).result, ms + 4000, "program"); }
   deadline(run: ReturnType<Fixture["start"]>) {
@@ -94,11 +94,11 @@ async function check(name: string, body: (fixture: Fixture) => Promise<void>) {
   finally { await h.cleanup(); }
 }
 
-await check("top-level planB validates before worker or effects; whitespace is accepted", async h => {
+await check("top-level intent validates before worker or effects; whitespace is accepted", async h => {
   const program = "await this.write('invalid-effect','unexpected'); return 1;";
   const baseline = liveProgramCount();
   const missing = h.input(program, "placeholder");
-  delete (missing as Partial<RunProgramInput>).planB;
+  delete (missing as Partial<RunProgramInput>).intent;
   invalid(await runProgram(missing));
   for (const value of [null, "", 0, false, {}]) invalid(await runProgram(h.input(program, value as string)));
   assert.equal(await exists(h.file("invalid-effect")), false);
@@ -111,10 +111,10 @@ await check("top-level planB validates before worker or effects; whitespace is a
 await check("repeat(48000) cannot provide call or unpark member budgets", async h => {
   const effect = h.file("member-effect");
   const cmd = command("require('node:fs').writeFileSync(" + literal(effect) + ",'unexpected');");
-  invalid(await h.run("const planB='x'.repeat(48000); return await this.call(" + literal(cmd) + ",planB);"));
+  invalid(await h.run("const intent='x'.repeat(48000); return await this.call(" + literal(cmd) + ",intent);"));
   assert.equal(await exists(effect), false);
   const target = parked(await h.run("const value=await this.park({stage:'ready'});await this.write('resumed',String(value));return value;"));
-  invalid(await h.run("const planB='x'.repeat(48000);return await this.unpark(" + literal(target) + ",undefined,planB);"));
+  invalid(await h.run("const intent='x'.repeat(48000);return await this.unpark(" + literal(target) + ",undefined,intent);"));
   assert.equal(await exists(h.file("resumed")), false);
   assert.ok(h.table.list(h.workspaceId).some(site => site.handle === target));
   assert.equal(done(await h.run(resume(target, "accepted"))), "accepted");

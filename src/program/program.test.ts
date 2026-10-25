@@ -28,7 +28,7 @@ async function run(program: string) {
     configDir,
     stateDir,
     program,
-    planB: 'w'.repeat(600),
+    intent: 'w'.repeat(600),
     parkTable,
   });
 }
@@ -135,7 +135,7 @@ async function run(program: string) {
 }
 
 {
-  // yield park via the top-level request planB
+  // yield park via the top-level request intent
   const result = await runProgram({
     workspaceId: "ws_test",
     root,
@@ -146,7 +146,7 @@ async function run(program: string) {
       await this.call("sleep 1");
       return "done";
     `,
-    planB: "abc",
+    intent: "abc",
     parkTable: new ParkTable(60_000),
   });
   assert.equal(result.status, "parked");
@@ -155,7 +155,7 @@ async function run(program: string) {
 }
 
 {
-  // foreground call uses the top-level request planB
+  // foreground call uses the top-level request intent
   const result = await run(`
     const out = await this.call("echo hello");
     return out.stdout.trim();

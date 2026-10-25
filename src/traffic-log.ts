@@ -15,15 +15,17 @@ const parse = (text: string): unknown => {
   try { return JSON.parse(text); } catch { return text; }
 };
 
-function rpcInfo(body: unknown): { tool?: string; workspaceId?: string } {
+function rpcInfo(body: unknown): { tool?: string; workspaceId?: string; rpcMethod?: string; intent?: string } {
   if (!body || typeof body !== "object") return {};
+  const rpcMethod = typeof (body as Record<string, unknown>).method === "string" ? (body as Record<string, unknown>).method as string : undefined;
   const params = (body as Record<string, unknown>).params;
-  if (!params || typeof params !== "object") return {};
+  if (!params || typeof params !== "object") return { rpcMethod };
   const record = params as Record<string, unknown>;
   const tool = typeof record.name === "string" ? record.name : undefined;
   const args = record.arguments && typeof record.arguments === "object" ? (record.arguments as Record<string, unknown>) : undefined;
   const workspaceId = typeof args?.workspaceId === "string" ? args.workspaceId : undefined;
-  return { tool, workspaceId };
+  const intent = typeof args?.intent === "string" ? args.intent : undefined;
+  return { tool, workspaceId, rpcMethod, intent };
 }
 
 export function trafficLog(stateDir: string, enabled = true): RequestHandler {
@@ -50,7 +52,14 @@ export function trafficLog(stateDir: string, enabled = true): RequestHandler {
     const requestId = String(res.locals.requestId ?? "");
     const info = rpcInfo(req.body);
     // A start record without an end record is a request that is still (or was) hung.
-    void append({ phase: "start", ts: new Date(t0).toISOString(), requestId, method: req.method, ...info }).catch(() => undefined);
+    void append({
+      phase: "start",
+      ts: new Date(t0).toISOString(),
+      requestId,
+      method: req.method,
+      userAgent: req.header("user-agent"),
+      ...info,
+    }).catch(() => undefined);
     const release = trackInflight({ requestId, method: req.method, ...info });
     // A request that is still open after 10s is what clients experience as "hung"; say so now
     // instead of waiting for it to close.

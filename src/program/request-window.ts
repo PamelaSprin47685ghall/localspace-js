@@ -1,13 +1,13 @@
 import { performance } from "node:perf_hooks";
 
 // 每次工具准入只建立一个主线程窗口，恢复目标借用同一个对象。
-/** 单次请求最长等待 30 秒：planB 再长也按这个数封顶（= 600 个 UTF-8 字节）。 */
+/** 单次请求最长等待 30 秒：intent 再长也按这个数封顶（= 600 个 UTF-8 字节）。 */
 export const MAX_REQUEST_WAIT_MS = 30_000;
 
 export class RequestWindow {
   /** 实际生效的等待预算（已封顶）。 */
   readonly budgetMs: number;
-  /** planB 换算出来的原始预算，可能大于 budgetMs。 */
+  /** intent 换算出来的原始预算，可能大于 budgetMs。 */
   readonly requestedMs: number;
   readonly deadline: number;
   private expired = false;
@@ -15,8 +15,8 @@ export class RequestWindow {
   private timer?: NodeJS.Timeout;
   private readonly listeners = new Map<number, () => void>();
 
-  constructor(readonly planB: string) {
-    this.requestedMs = Buffer.byteLength(planB, "utf8") * 50;
+  constructor(readonly intent: string) {
+    this.requestedMs = Buffer.byteLength(intent, "utf8") * 50;
     this.budgetMs = Math.min(this.requestedMs, MAX_REQUEST_WAIT_MS);
     this.deadline = performance.now() + this.budgetMs;
   }

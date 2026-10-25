@@ -14,7 +14,7 @@ export interface RunProgramInput {
   stateDir: string;
   program: string;
   /** 必填工具参数；整个请求及其恢复目标共用 UTF-8 字节数 × 50ms。 */
-  planB: string;
+  intent: string;
   parkTable?: ParkTable;
   /** Aborted when the MCP request is cancelled or its connection drops: the run and its process groups die. */
   signal?: AbortSignal;
@@ -42,11 +42,11 @@ export function liveProgramCount(): number {
 
 /** 独立 worker 执行程序；主线程持有一次准入的绝对截止时间。 */
 export async function runProgram(input: RunProgramInput): Promise<RunProgramResult> {
-  if (typeof input.planB !== "string" || input.planB.length === 0) {
-    return { status: "failed", error: { code: "INVALID_ARGUMENT", message: "js 工具顶层 planB 必须是非空字符串；等待时间为 UTF-8 字节数 × 50 ms。" }, written: [] };
+  if (typeof input.intent !== "string" || input.intent.length === 0) {
+    return { status: "failed", error: { code: "INVALID_ARGUMENT", message: "js 工具顶层 intent 必须是非空字符串；等待时间为 UTF-8 字节数 × 50 ms。" }, written: [] };
   }
   if (input.signal?.aborted) return { status: "failed", error: { code: "CANCELLED", message: "请求已取消，程序未启动。" }, written: [] };
-  const window = new RequestWindow(input.planB);
+  const window = new RequestWindow(input.intent);
   const run = new ProgramRun(input, input.parkTable ?? globalParkTable, window);
   // The client hung up: the program (and its calls) keep running and stay claimable via park.
   const onAbort = () => run.detach();
@@ -133,7 +133,7 @@ class ProgramRun {
     this.detachWindow();
     this.detachedResult = this.park("yield", {
       message:
-        "客户端已断开；程序及其命令仍在后台运行。下一次 js 请求用 this.unpark(handle) 继续等它结束（顶层 planB 决定等多久），不要重跑命令。",
+        "客户端已断开；程序及其命令仍在后台运行。下一次 js 请求用 this.unpark(handle) 继续等它结束（顶层 intent 决定等多久），不要重跑命令。",
       elapsedMs: Date.now() - this.startedAt,
       delta: this.hub.takeDelta(),
     });
@@ -218,9 +218,9 @@ class ProgramRun {
     const waitingOnCall = this.callActive > 0;
     return this.park("yield", {
       message: waitingOnCall
-        ? `本次 js 请求的共享等待窗口（${this.window.budgetMs} ms）用完，已启动命令仍在后台运行。delta 是新增输出。下一次 js 请求提供顶层 planB，并用 this.unpark(handle) 继续，程序成员不能增加预算。`
-        : `本次 js 请求的共享等待窗口（${this.window.budgetMs} ms）用完。下一次 js 请求提供顶层 planB，并用 this.unpark(handle) 继续；全部 call 和 unpark 共用该请求的截止时间。`,
-      planB: this.window.planB,
+        ? `本次 js 请求的共享等待窗口（${this.window.budgetMs} ms）用完，已启动命令仍在后台运行。delta 是新增输出。下一次 js 请求提供顶层 intent，并用 this.unpark(handle) 继续，程序成员不能增加预算。`
+        : `本次 js 请求的共享等待窗口（${this.window.budgetMs} ms）用完。下一次 js 请求提供顶层 intent，并用 this.unpark(handle) 继续；全部 call 和 unpark 共用该请求的截止时间。`,
+      intent: this.window.intent,
       budgetMs: this.window.budgetMs,
       ...(this.window.capped ? { cappedFromMs: this.window.requestedMs } : {}),
       elapsedMs: Date.now() - this.startedAt,

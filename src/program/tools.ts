@@ -125,11 +125,11 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
     {
       title: "JS 编程面",
       description:
-        "在工作区运行一段平铺的异步 JavaScript 程序。必填输入为 program 和 planB，workspaceId 可省略。" +
+        "在工作区运行一段平铺的异步 JavaScript 程序。必填输入为 program 和 intent（本次请求的意图），workspaceId 可省略。" +
         "省略时使用最近使用的工作区；也可直接传入项目根目录路径。不要为了拿新 id 重新 open_workspace。" +
         "全部原语均为 this 成员：this.cat/stat/ls/search/findRelated/where/whereAll/write/mkdir/mv/rm/call/park，" +
         "以及 this.signal(sig) 与 this.send(input)。" +
-        "顶层 planB 的 UTF-8 字节数 × 50ms 是整次请求的统一等待时限：每 20 字节 1 秒，单次封顶 30 秒（600 字节）。this.call(command) 和 this.unpark(handle,value?) 共用剩余时间，恢复目标不会新建预算；客户端断开后程序继续跑，现场留在 parked 列表；写入立即落盘；危险操作与 where 歧义会 park。" +
+        "顶层 intent 的 UTF-8 字节数 × 50ms 是整次请求的统一等待时限：每 20 字节 1 秒，单次封顶 30 秒（600 字节）。this.call(command) 和 this.unpark(handle,value?) 共用剩余时间，恢复目标不会新建预算；客户端断开后程序继续跑，现场留在 parked 列表；写入立即落盘；危险操作与 where 歧义会 park。" +
         "互不相干的任务可在同一轮并行调用多个 js。",
       inputSchema: z.object({
         workspaceId: z
@@ -137,7 +137,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           .nullish()
           .describe("open_workspace 返回的稳定标识，或项目根目录路径。省略则复用最近使用的工作区。"),
         program: z.string().min(1).describe("平铺的异步 JavaScript 程序体，可直接 await 顶层。"),
-        planB: z.string().min(1).describe("必填非空的备选方案文字；换算：每 20 个 UTF-8 字节 = 1 秒，单次请求最多 30 秒（600 字节，写更长也按 30 秒封顶）。这个截止时间被整次请求及其全部 call、unpark 共用，程序内不能续期；客户端断开时程序继续在后台跑。"),
+        intent: z.string().min(1).describe("本次请求想达成什么（不是退路）。换算：每 20 个 UTF-8 字节 = 1 秒，单次请求最多 30 秒（600 字节，写更长也按 30 秒封顶）。这个截止时间被整次请求及其全部 call、unpark 共用，程序内不能续期；客户端断开时程序继续在后台跑。"),
       }),
       outputSchema: z.object({
         servedAt: z.string().describe("本次回复的 UTC 时间（ISO 8601）。"),
@@ -157,7 +157,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ workspaceId, program, planB }, ctx) => {
+    async ({ workspaceId, program, intent }, ctx) => {
       const startedAt = performance.now();
       let resolvedId: string | undefined = workspaceId ?? undefined;
       try {
@@ -170,7 +170,7 @@ export function registerJsSurface(server: McpServer, deps: JsSurfaceDeps): void 
           configDir,
           stateDir: config.stateDir,
           program,
-          planB,
+          intent,
           signal: ctx.mcpReq.signal,
         });
 

@@ -11,19 +11,19 @@ export const GUIDELINE_TEXT = `# LocalSpace 工作总纲
 
 优先使用 \`js\`。需要打开或切换目录时先 \`open_workspace\`。不要寻找已退役的 read/edit/write/bash/exec_command。
 
-\`js\` 的输入是 \`{ workspaceId?, program, planB }\`。\`workspaceId\` 由目录决定、稳定不变；省略即复用最近使用的工作区，也可直接传项目根目录路径。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
+\`js\` 的输入是 \`{ workspaceId?, program, intent }\`。\`workspaceId\` 由目录决定、稳定不变；省略即复用最近使用的工作区，也可直接传项目根目录路径。\`program\` 是一段平铺的异步 JavaScript（不是 class）。**全部原语都是 \`this\` 的成员**（万象术风格）：
 
 - 读与搜：\`this.cat\`、\`this.stat\`、\`this.ls\`、\`this.search(query, opts?)\`（语义索引，repo 绑定当前工作区）、\`this.findRelated(file, line, opts?)\`、\`this.where\`（字面匹配）、\`this.whereAll\`（字面匹配）
   - \`this.search\` 由内置的 Semble（经 \`uvx\` 启动）提供：传函数名/行为描述，返回 \`{ query, results: [{ file_path, start_line, end_line, score, content? }] }\`。\`opts\` 可为 \`{ topK, maxSnippetLines, content }\`；首次调用要下载依赖并建索引，可能超过一个等待窗口——到点照常 yield，\`this.unpark(handle)\` 继续等即可，不要重发查询。
   - \`this.findRelated(file, line, opts?)\` 在同一次索引里找相似代码（找实现、调用方、同类测试），\`file\` 用搜索结果里的路径。
 - 写：\`this.write\`、\`this.mkdir\`、\`this.mv\`、\`this.rm\`——立即落盘，不暂存、不回滚
-- 执行：\`this.call(command)\`，只收命令字符串，没有自己的时限；所有 \`call\` / \`unpark\` 共用**本请求顶层 \`planB\`** 买的那个截止时间。
+- 执行：\`this.call(command)\`，只收命令字符串，没有自己的时限；所有 \`call\` / \`unpark\` 共用**本请求顶层 \`intent\`** 买的那个截止时间。
   - \`this.signal(sig)\` 与 \`this.send(input)\` 作用在让这次程序 park 的那条 call 上。没有这样一条仍在跑的命令时是 CALL_CHILD_UNKNOWN。
   - 自动 park 的载荷带 \`delta: { stdout, stderr }\`：自上次 park 以来的新输出；命令最终结果仍在 \`CallResult\` 里，不会因为 yield 丢失。
 - 协商：\`this.park(payload)\`；定位歧义时 \`this.where\` 会自己 park
-- 恢复：\`this.unpark(handle, arg?)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段。yield 现场的 \`arg\` 不注入命令结果；where/confirm/park 现场才用 \`arg\` 续跑。等待多久由**新请求的顶层 \`planB\`** 决定，程序里不能续期。
+- 恢复：\`this.unpark(handle, arg?)\`、\`this.abandon(handle)\`——在**新的** program 里调用，不是工具顶层字段。yield 现场的 \`arg\` 不注入命令结果；where/confirm/park 现场才用 \`arg\` 续跑。等待多久由**新请求的顶层 \`intent\`** 决定，程序里不能续期。
 
-时间规则：\`js\` 的顶层 \`planB\` **必填**，按 **每 20 个 UTF-8 字节换 1 秒** 换算（\`Buffer.byteLength(planB) × 50ms\`），**单次请求最多 30 秒（600 字节），写得更长也按 30 秒封顶**。这一个截止时间被本次请求里所有 \`this.call\` 和 \`this.unpark\` 共用，程序自身不另算等待；到点一定返回 yield park，命令与程序都在后台继续。客户端断开也一样：程序不杀，现场留在 \`parked:\` 列表里，回来 \`this.unpark(handle)\` 取结果，不要重跑。
+时间规则：\`js\` 的顶层 \`intent\` **必填**（写这次要达成什么，不是退路），按 **每 20 个 UTF-8 字节换 1 秒** 换算（\`Buffer.byteLength(intent) × 50ms\`），**单次请求最多 30 秒（600 字节），写得更长也按 30 秒封顶**。这一个截止时间被本次请求里所有 \`this.call\` 和 \`this.unpark\` 共用，程序自身不另算等待；到点一定返回 yield park，命令与程序都在后台继续。客户端断开也一样：程序不杀，现场留在 \`parked:\` 列表里，回来 \`this.unpark(handle)\` 取结果，不要重跑。
 
 互不相干的活计，尽量在同一轮并行发出多条 \`js\`。有依赖的串行。同一文件的并发写入后果自负。
 
@@ -71,4 +71,4 @@ this.cat(path) this.stat(path) this.ls(path) this.where(text,needle) this.whereA
 this.search(query[,{topK,maxSnippetLines,content}]) this.findRelated(file,line[,opts]) [Semble 语义索引，repo=当前工作区；依赖 uvx]
 this.write(path,content) this.mkdir(path) this.mv(from,to) this.rm(path[,{recursive}])
 this.call(command) this.signal(sig) this.send(input) this.park(payload) this.unpark(handle,arg?) this.abandon(handle)
-js 必须带顶层 planB：每 20 个 UTF-8 字节换 1 秒，单次请求封顶 30 秒（600 字节，超出按 30 秒）；所有 call 与 unpark 共用一个截止时间，到期 yield park 带 delta 且程序继续跑；yield 后用 this.unpark(handle) 配新请求的 planB 继续，不重跑命令；客户端断开不杀程序，现场留在 parked 列表；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;
+js 必须带顶层 intent（本次意图，不是退路）：每 20 个 UTF-8 字节换 1 秒，单次请求封顶 30 秒（600 字节，超出按 30 秒）；所有 call 与 unpark 共用一个截止时间，到期 yield park 带 delta 且程序继续跑；yield 后用 this.unpark(handle) 配新请求的 intent 继续，不重跑命令；客户端断开不杀程序，现场留在 parked 列表；signal/send 作用在让程序 park 的那条 call 上；写入立即落盘；危险操作会 park。`;

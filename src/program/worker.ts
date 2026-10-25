@@ -58,7 +58,7 @@ const api = {
   ...surface,
   unpark(handle: string, value?: unknown) {
     if (arguments.length < 1 || arguments.length > 2)
-      throw new ProgramError("INVALID_ARGUMENT", "unpark(handle, value?) 最多接受两个参数；等待预算来自 js 工具顶层 planB。");
+      throw new ProgramError("INVALID_ARGUMENT", "unpark(handle, value?) 最多接受两个参数；等待预算来自 js 工具顶层 intent。");
     if (typeof handle !== "string" || !handle)
       throw new ProgramError("INVALID_ARGUMENT", "unpark 的 handle 必须是非空字符串。");
     return ask(id => ({ t: "unpark", id, handle, value }));

@@ -38,7 +38,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
     configDir,
     stateDir,
     program,
-    planB: 'w'.repeat(Math.ceil((opts.budget ?? 30_000) / 50)),
+    intent: 'w'.repeat(Math.ceil((opts.budget ?? 30_000) / 50)),
     parkTable: opts.parkTable ?? new ParkTable(60_000),
     signal: opts.signal,
   });
@@ -166,7 +166,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
   console.log("client disconnect keeps the program alive: ok");
 }
 
-// planB is capped at 30s no matter how long it is written.
+// intent is capped at 30s no matter how long it is written.
 {
   assert.equal(new RequestWindow("b".repeat(200)).budgetMs, 10_000);
   const long = new RequestWindow("b".repeat(2_000));
@@ -194,7 +194,7 @@ function run(program: string, opts: { budget?: number; parkTable?: ParkTable; si
 assert.equal(liveProgramCount(), 0);
 console.log("hardening.test.ts: all ok");
 
-// A call that outlives its planB keeps running: unpark delivers the real CallResult (not the
+// A call that outlives its intent keeps running: unpark delivers the real CallResult (not the
 // park argument), and output produced before the yield is still in the final result.
 {
   const table = new ParkTable(60_000);
@@ -207,15 +207,15 @@ console.log("hardening.test.ts: all ok");
   assert.match(payload.delta?.stdout ?? "", /EARLY/);
   await sleep(900);
   const resumed = await run(
-    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, { planB: "not a CallResult" });`,
+    `return await this.unpark(${JSON.stringify(first.parked!.handle)}, { intent: "not a CallResult" });`,
     { budget: 5000, parkTable: table },
   );
   assert.equal(resumed.status, "done", JSON.stringify(resumed));
-  const v = resumed.value as { exitCode: number; stdout: string; planB?: string };
+  const v = resumed.value as { exitCode: number; stdout: string; intent?: string };
   assert.equal(v.exitCode, 0);
   assert.match(v.stdout, /EARLY/);
   assert.match(v.stdout, /LATE/);
-  assert.equal(v.planB, undefined);
+  assert.equal(v.intent, undefined);
   console.log("yield keeps call alive + real result: ok");
 }
 

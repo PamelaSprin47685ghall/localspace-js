@@ -268,7 +268,7 @@ export function createProgramApi(ctx: ApiContext) {
 
   async function call(command: string): Promise<CallResult> {
     if (arguments.length !== 1)
-      throw new ProgramError("INVALID_ARGUMENT", "call(command) 只接受一个参数；等待预算来自 js 工具顶层 planB。");
+      throw new ProgramError("INVALID_ARGUMENT", "call(command) 只接受一个参数；等待预算来自 js 工具顶层 intent。");
     return runCall(command, {});
   }
 
