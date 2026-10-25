@@ -15,7 +15,7 @@ const option = (name, fallback) => {
 const stateDir = option("--state-dir", join(homedir(), ".local", "share", "localspace"));
 const trafficDir = join(stateDir, "traffic");
 const full = flag("--full");
-const color = !flag("--no-color") && !process.env.NO_COLOR && process.stdout.isTTY !== false;
+const color = !flag("--no-color") && !process.env.NO_COLOR && process.stdout.isTTY === true;
 
 const paint = (code) => (text) => (color ? `\u001b[${code}m${text}\u001b[0m` : text);
 const dim = paint("2");
